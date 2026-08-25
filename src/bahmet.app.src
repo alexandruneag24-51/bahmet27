@@ -1,0 +1,10 @@
+{application, bahmet,
+ [{description, "Bahmet 27 - un DSL si un cadru de executie pentru IA"},
+  {vsn, "0.1.0"},
+  {registered, [bahmet_sup, bahmet_ground, bahmet_commons, bahmet_council_sup]},
+  {mod, {bahmet_app, []}},
+  {applications, [kernel, stdlib]},
+  {env, []},
+  {modules, []},
+  {licenses, ["Apache-2.0"]}
+ ]}.

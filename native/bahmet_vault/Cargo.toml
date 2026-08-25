@@ -1,0 +1,49 @@
+[package]
+name = "bahmet_vault"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Custodia cheilor: umbra care nu dezvaluie"
+license = "Apache-2.0"
+
+[lib]
+name = "bahmet_vault"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustler = "0.36"
+
+# Primitivele NU sunt scrise de noi. Toate vin din RustCrypto, auditate si
+# larg folosite. Codul nostru doar le orchestreaza -- iar cele mai multe
+# bug-uri criptografice reale stau in orchestrare, nu in primitive.
+chacha20poly1305 = "0.10"   # XChaCha20-Poly1305, nonce de 192 biti
+sha2             = "0.10"   # amprente de audit
+rand_core        = { version = "0.6", features = ["getrandom"] }
+
+# Scrieri volatile + bariera de compilator. Fara acest crate, LLVM ar putea
+# elimina stergerea unei zone care urmeaza sa fie eliberata -- un bug care
+# nu apare niciodata in debug si e mereu prezent in release.
+zeroize = { version = "1.8", features = ["derive"] }
+
+# Comparatii in timp constant. `==` pe secrete iese devreme la prima
+# diferenta, deci scurge pozitia ei prin durata executiei.
+subtle = "2.6"
+
+# FAZA 2 -- post-cuantic, hibrid, niciodata pur:
+# libcrux-ml-kem = "0.0.2"    # ML-KEM verificat formal
+# x25519-dalek   = "2"        # partea clasica a hibridului
+# hkdf           = "0.12"     # combinarea celor doua secrete
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# Obligatoriu "unwind": rustler prinde panicile la marginea NIF-ului si le
+# transforma in exceptii Erlang. Cu "abort", o panica ar omori intreaga
+# masina virtuala -- tot sistemul, pentru o singura intrare malformata.
+# Iar intrarile vin din exterior si trebuie tratate ca ostile.
+panic = "unwind"
+
+[dev-dependencies]
+hex = "0.4"

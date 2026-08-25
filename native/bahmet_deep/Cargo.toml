@@ -1,0 +1,30 @@
+[package]
+name = "bahmet_deep"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Adâncul: nucleul de intuiție și introspecție al lui Bahmet 27"
+license = "Apache-2.0"
+
+[lib]
+name = "bahmet_deep"
+path = "src/lib.rs"
+# `cdylib` produce biblioteca pe care BEAM o încarcă prin erlang:load_nif/2.
+# `rlib` o păstrează testabilă cu `cargo test` fără mașina virtuală pornită —
+# matematica poate fi verificată în izolare, înainte de a atinge sistemul.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Versiunea contează: API-ul de resurse (`#[rustler::resource_impl]`) și
+# `init!` cu descoperire automată există începând cu 0.34.
+rustler = "0.36"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# `panic = "abort"` ar fi TENTANT aici, dar este INTERZIS: rustler prinde
+# panicile la marginea NIF-ului și le transformă în excepții Erlang. Cu
+# "abort", orice panică ar omorî întregul proces al mașinii virtuale — adică
+# tot cercul, pentru greșeala unei singure ființe. Lăsăm derularea activă.
+panic = "unwind"

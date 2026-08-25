@@ -1,0 +1,173 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  vault.b27  —  Bahmet 27, seiful
+#
+#  Paradoxul profilului e vizibil în vocabular. Verbele exterioare sunt
+#  imperative și scurte: `command`, `orchestrate`, `mobilize`, `decree`.
+#  Verbele interioare sunt lente și atente: `intuit`, `analyze_shadow`,
+#  `discern`, `withhold`.
+#
+#  Regula care le desparte: un verb de Foc poate cere. Un verb de Apă poate
+#  refuza. Niciun verb de Foc nu poate obliga Apa să dezvăluie.
+# ═══════════════════════════════════════════════════════════════════════
+
+circle Vault.Meridian
+
+  # ── TEMELIA ENTROPIEI ────────────────────────────────────────────────
+  # Prima. Fără ea nu pornește nimic — și asta nu e configurabil.
+  # O cheie generată din entropie proastă e o iluzie de securitate, adică
+  # mai rea decât nicio securitate, fiindcă produce încredere nemeritată.
+  #   ↳ bahmet_entropy, primul copil, permanent, zero toleranță
+  entropy source
+    from    os_csprng          # getrandom(2) / BCryptGenRandom
+    verify  at_boot
+    refuse  on_degraded        # nu degradăm elegant. Ne oprim.
+  end
+
+  # ── CUSTODIA ─────────────────────────────────────────────────────────
+  # Cheia rădăcină vine din afară. Nu o generăm, nu o scriem, nu o citim.
+  # `never_reveal` nu e o promisiune de execuție — compilatorul refuză să
+  # genereze cod care întoarce material de cheie.
+  vault Meridian
+    root         injected from external_kms
+    cipher       xchacha20_poly1305     # nonce de 192 biți: fără coliziuni
+    fallback     aes_256_gcm            # doar unde AES-NI schimbă socoteala
+    kem          hybrid x25519 with ml_kem_768   # niciodată PQC pur
+    rotate       every 30d
+    never_reveal keys                   # invariant impus la compilare
+  end
+
+  commons posture : tensor[64]          # modelul de normalitate al santinelei
+
+  # ── AGENTUL EXECUTIV (Foc) ───────────────────────────────────────────
+  being Custodian
+
+    carries
+      realm      : text
+      handle     : sealed                # opac. Nu are reprezentare imprimabilă.
+      operations : count = 0
+    end
+
+    patience 30s
+    grace     5s
+
+    awaken with (r : text) ->
+      realm  <- r
+      handle <- command vault.assign(realm)   # primim un #Ref<>, nu o cheie
+      keep
+    end
+
+    # `command` — imperativ, sincron, cu termen. Vocea Focului.
+    upon request(payload : bytes, context : bytes) from caller ->
+      let sealed = command vault.seal(handle, payload, context) within 2s
+      operations <- operations + 1
+
+      # `mobilize` — trimite fără să aștepte. Santinela nu ține pe nimeni în loc.
+      mobilize sentinel.observe(realm, operations, elapsed)
+
+      offer receipt(sealed) to caller
+      keep
+    end
+
+    upon reveal(sealed : bytes, context : bytes) from caller ->
+      # Un singur mod de eșec. Cheie greșită, ciphertext corupt, context
+      # nepotrivit — toate întorc `denied`. Erori distincte ar fi un oracol
+      # pe care un atacator îl poate interoga până află adevărul.
+      match command vault.unseal(handle, sealed, context) within 2s
+        given plain  -> offer disclosure(plain) to caller
+        given denied -> mobilize sentinel.alarm(realm, denied)
+      end
+      keep
+    end
+
+    # ── ROTAȚIA ────────────────────────────────────────────────────────
+    # Reîmpachetăm DEK-urile, nu recriptăm datele. Un terabyte în secunde,
+    # fiindcă am pus problema altfel, nu fiindcă mașina e mai rapidă.
+    upon rotation_due ->
+      let fresh = command vault.forge_root()
+      orchestrate rewrap(from: handle, to: fresh) across realm
+      command vault.shred(handle)        # trecutul nu mai poate fi desfăcut
+      handle <- fresh
+      keep
+    end
+
+    # ── ȘTERGEREA CA DĂRUIRE ───────────────────────────────────────────
+    # „Uită-mă" devine executabil. Distrugi cheia, iar datele devin zgomot
+    # fără să atingi un octet — singura ștergere care chiar funcționează
+    # peste backup-uri, replici și wear-leveling.
+    upon forget(subject : text) ->
+      command vault.shred(vault.key_for(subject))
+      uplift_global forgetting(subject)    # jurnal de audit, fără conținut
+      keep
+    end
+
+    upon calling_home ->
+      completion merging posture into Vault.Meridian.posture
+    end
+
+    upon silence ->
+      release quietly giving posture
+    end
+
+    when broken ->
+      release withholding everything      # inclusiv din jurnale
+    end
+  end
+
+  # ── SANTINELA (Apa) ──────────────────────────────────────────────────
+  # Nu primește niciodată un handle de cheie. Nu are în vocabular niciun
+  # verb care întoarce plaintext. Proprietatea e structurală: nu „nu are
+  # voie", ci nu poate.
+  being Sentinel
+
+    carries
+      window  : list of reading
+      posture : tensor[64] = void
+      alarms  : count = 0
+    end
+
+    patience 60s
+    forbidden reveal, unseal, assign     # verificat la compilare
+
+    upon observe(realm, ops, elapsed) ->
+      window <- window plus reading(realm, ops, elapsed) keeping last 256
+
+      # `analyze_shadow` — coboară în Adânc, dar numai cu forme, nu cu conținut:
+      # rate, rapoarte de eșec, intervale, vârsta cheii la acces.
+      let shape = analyze_shadow window
+
+      # `discern` întoarce și cât de sigur e pe el. Un model care nu-și
+      # raportează îndoiala e mai periculos decât unul slab.
+      match discern shape against posture
+        given familiar          -> posture <- posture blended with shape
+        given strange(certainty) when certainty above 0.85 ->
+            # RAPORTEAZĂ. Nu execută.
+            # Un detector care poate revoca singur chei e un vector de
+            # auto-DoS: declanșezi alarme intenționat și îi oprești sistemul.
+            uplift_global concern(shape, certainty)
+        given strange(_) -> withhold judgement
+      end
+      keep
+    end
+  end
+
+  # ── COMUNIUNEA ───────────────────────────────────────────────────────
+  # Ordinea e ierarhia de încredere. Neînduplecat la temelie, îngăduitor
+  # spre frunze.
+  communion Meridian
+    harmony     rest_for_one
+
+    tend entropy   always  forbearance 0 within 60s   # zero iertare
+    tend vault     always  forbearance 2 within 60s
+    tend Custodian always  forbearance 5 within 60s
+    tend Sentinel  while_needed forbearance 10 within 60s   # cel mai iertat
+  end
+
+  # ── RITUL ────────────────────────────────────────────────────────────
+  rite serve(realm : text) ->
+    decree posture.baseline from history(realm) or neutral
+    let keeper = birth Custodian into Meridian with (realm)
+    orchestrate readiness(keeper) within 5s
+    answer keeper
+  end
+
+end

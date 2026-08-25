@@ -1,0 +1,143 @@
+# ═══════════════════════════════════════════════════════════════════════
+#  contemplation.b27  —  Bahmet 27, script de probă
+#
+#  Un cerc de ființe primește o întrebare, coboară în Adânc după intuiție,
+#  și se împlinește dăruindu-și înțelegerea bunului comun.
+#
+#  Fiecare construct de aici are o țintă exactă de compilare (lowering)
+#  în OTP sau în Rust. Vezi dsl/GRAMMAR.md, tabelul de coborâre.
+# ═══════════════════════════════════════════════════════════════════════
+
+circle Council.Dawn
+
+  # ── TEMELIA ──────────────────────────────────────────────────────────
+  # `ground` leagă cercul de Adânc (nucleul Rust). Se deschide o singură
+  # dată, ÎNAINTEA oricărei ființe: nimeni nu se naște pe un pământ care
+  # nu există încă. Ordinea aceasta nu e stilistică — ea devine ordinea
+  # copiilor într-un arbore `rest_for_one`, unde dependența e structurală.
+  #   ↳ bahmet_ground, primul copil al lui bahmet_sup
+  ground deep
+    dimension 256
+    seed      27
+  end
+
+  # ── BUNUL COMUN ──────────────────────────────────────────────────────
+  # Locul unde se varsă împlinirile. Nu e memorie partajată: este o ființă
+  # ca oricare alta, care primește daruri prin mesaje. Nimeni nu scrie în
+  # ea; toți îi oferă.
+  #   ↳ bahmet_commons, al doilea copil
+  commons wisdom : tensor[256]
+
+  # ── FIINȚA ───────────────────────────────────────────────────────────
+  # `being` = un actor. Nu împarte nimic. Ce vezi în `carries` îi aparține
+  # exclusiv și moare odată cu el — dacă nu alege să dăruiască.
+  #   ↳ un gen_server (bahmet_contemplator)
+  being Contemplator
+
+    carries
+      question  : text
+      insight   : tensor[256] = void
+      offerings : count       = 0
+    end
+
+    # Răbdarea este declarată, nu improvizată. O ființă care așteaptă
+    # la nesfârșit nu e răbdătoare, e blocată.
+    patience 30s        # ↳ timeout-ul din {noreply, State, Patience}
+    grace     5s        # ↳ `shutdown => 5000`: răgazul de a dărui la plecare
+
+    awaken with (q : text) ->
+      question <- q
+      keep              # ↳ {ok, State, Patience}
+    end
+
+    # ── PRIMIRE ────────────────────────────────────────────────────────
+    # `upon offering(...)` este cutia poștală. Mesajul e un dar, nu o
+    # comandă: emițătorul nu așteaptă și nu se blochează.
+    upon offering(seed : tensor[256]) from giver ->
+      # `intuit` traversează puntea în Adânc. Rulează pe un planificator
+      # murdar (DirtyCpu), ca să nu fure timpul altor ființe: calculul greu
+      # se retrage politicos din firul comun.
+      insight   <- intuit deep with seed
+      offerings <- offerings + 1
+
+      # `offer` = cast. Un dar nu cere confirmare.
+      offer thanks(offerings) to giver
+      keep
+    end
+
+    # ── ÎNTREBARE ──────────────────────────────────────────────────────
+    # `ask` este singura formă sincronă și are OBLIGATORIU o limită.
+    # Nu ceri nimănui timp nedefinit.
+    ask reflection within 1s ->
+      answer reflect deep
+    end
+
+    # ── ÎMPLINIRE ──────────────────────────────────────────────────────
+    # `completion` nu e moarte, e sfârșitul unui drum dus până la capăt.
+    # Ființa își varsă înțelegerea în bunul comun și se stinge NORMAL —
+    # iar supervizorul, fiind `transient`, nu o reînvie: respectă lucrul
+    # terminat în loc să-l repornească la infinit.
+    upon calling_home ->
+      completion merging insight into wisdom
+    end
+
+    # ── TĂCEREA ────────────────────────────────────────────────────────
+    # Dacă răbdarea se epuizează, ființa nu se plânge: eliberează resursa
+    # pentru ceilalți. Altruism prin retragere.
+    upon silence ->
+      release quietly giving insight
+    end
+
+    # ── INTEGRITATE ────────────────────────────────────────────────────
+    # Dacă s-a rupt ceva înăuntru, ființa NU dăruiește. O stare coruptă
+    # oferită bunului comun otrăvește tot cercul. Mai bine nimic decât fals.
+    when broken ->
+      release withholding insight
+    end
+  end
+
+  # ── COMUNIUNEA (perspectiva globală) ────────────────────────────────
+  # Cine ține de cine. Ordinea contează: `rest_for_one` spune că, dacă
+  # temelia se schimbă, tot ce s-a ridicat DUPĂ ea trebuie refondat —
+  # dar nimic dinaintea ei nu e tulburat.
+  #   ↳ bahmet_sup
+  communion Council
+    harmony     rest_for_one
+    forbearance 3 within 60s     # ↳ intensity/period: răbdare mărginită
+
+    tend deep      always        # ↳ permanent
+    tend wisdom    always        # ↳ permanent
+    tend Gathering while_needed  # ↳ transient
+  end
+
+  # ── ADUNAREA ─────────────────────────────────────────────────────────
+  # Aici se nasc ființele. Căderea uneia nu atinge pe nimeni: fiecare e
+  # singură în fața propriei greșeli, dar niciodată singură în cerc.
+  #   ↳ bahmet_council_sup
+  gathering Gathering
+    harmony     one_for_one
+    forbearance 5 within 60s
+    completes when all present are complete   # ↳ auto_shutdown => all_significant
+  end
+
+  # ── RITUL ────────────────────────────────────────────────────────────
+  rite convene(questions : list of text) -> tensor[256]
+
+    let seed = intuit deep with tensor.origin(256)
+
+    for each q in questions ->
+      let one = birth Contemplator into Gathering with (q)
+      offer offering(seed) to one
+    end
+
+    for each one in Gathering.present ->
+      offer calling_home to one
+    end
+
+    # Așteptăm împlinirea întregului, nu a fiecăruia în parte.
+    await Gathering completion within 2m
+
+    answer wisdom
+  end
+
+end

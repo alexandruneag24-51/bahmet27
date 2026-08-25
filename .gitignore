@@ -1,0 +1,11 @@
+_build/
+native/*/target/
+priv/*.so
+priv/*.dll
+priv/*.dylib
+*.beam
+erl_crash.dump
+.rebar3/
+logs/
+*~
+.DS_Store
