@@ -23,6 +23,8 @@
          generated_being_completes_and_gives/1,
          generated_being_withholds_when_broken/1,
          generated_status_is_redacted/1,
+         broken_clause_body_is_honoured/1,
+         grace_survives_into_attributes/1,
          rejects_missing_broken_clause/1,
          rejects_missing_patience/1,
          rejects_unknown_commons/1,
@@ -50,7 +52,9 @@ groups() ->
      {generates, [], [generated_module_compiles,
                       generated_being_completes_and_gives,
                       generated_being_withholds_when_broken,
-                      generated_status_is_redacted]}].
+                      generated_status_is_redacted,
+                      broken_clause_body_is_honoured,
+                      grace_survives_into_attributes]}].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(bahmet),
@@ -183,6 +187,45 @@ generated_status_is_redacted(Config) ->
     ?assertNotEqual(nomatch, string:find(Text, "redacted")),
     exit(Pid, kill).
 
+%% Contra-proba pentru `generated_being_withholds_when_broken'.
+%%
+%% Retinerea la ruptura e IMPLICITUL, nu singura optiune. Daca autorul cere
+%% explicit sa se daruiasca si asa, compilatorul trebuie sa-l asculte.
+%%
+%% Verificatorul cere ca decizia sa fie luata; ar fi mai rau decat sa nu
+%% intrebe daca apoi ar ignora raspunsul.
+broken_clause_body_is_honoured(Config) ->
+    Dir = proplists:get_value(priv_dir, Config),
+    Source = variant([{"circle Hearth", "circle Hearth.Giving"},
+                      {"release withholding insight", "release quietly giving insight"}]),
+    {ok, [{Module, Code}]} = bahmet_compile:string(Source),
+    ?assertEqual(hearth_giving_keeper, Module),
+
+    File = filename:join(Dir, atom_to_list(Module) ++ ".erl"),
+    ok = file:write_file(File, Code),
+    {ok, Module} = compile:file(File, [return_errors, warnings_as_errors, {outdir, Dir}]),
+    true = code:add_patha(Dir),
+    {module, Module} = code:load_file(Module),
+
+    Before = length(bahmet_commons:contributors()),
+    {ok, Pid} = Module:start_link({generat, 4}, [<<"q">>]),
+    unlink(Pid),
+    ok = Module:offering(Pid, seed()),
+    timer:sleep(200),
+    exit(Pid, ruptura),
+    ok = wait_gone(Pid),
+    timer:sleep(150),
+    ?assertEqual(Before + 1, length(bahmet_commons:contributors())).
+
+%% `grace' nu are unde ajunge in subsetul Fazei 3 -- e `shutdown' din
+%% specificatia de copil, iar `communion' nu e inca in gramatica. Il pastram
+%% ca atribut de modul: o declaratie care dispare tacut erodeaza increderea
+%% in toate celelalte.
+grace_survives_into_attributes(Config) ->
+    ok = ensure_loaded(Config),
+    Attributes = hearth_keeper:module_info(attributes),
+    ?assertEqual([5000], proplists:get_value(bahmet_grace, Attributes)).
+
 %%====================================================================
 %% Ajutoare
 %%====================================================================
@@ -209,9 +252,13 @@ read() ->
 without(Fragment) -> replace(Fragment, "").
 
 replace(Fragment, Replacement) ->
-    Text = read(),
-    ?assertNotEqual(nomatch, string:find(Text, Fragment)),
-    lists:flatten(string:replace(Text, Fragment, Replacement)).
+    variant([{Fragment, Replacement}]).
+
+variant(Substitutions) ->
+    lists:foldl(fun({From, To}, Text) ->
+                        ?assertNotEqual(nomatch, string:find(Text, From)),
+                        lists:flatten(string:replace(Text, From, To))
+                end, read(), Substitutions).
 
 %% Un refuz corect spune si DE CE, nu doar unde. Verificam amandoua.
 refuses(Source, Expected) ->

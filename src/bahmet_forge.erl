@@ -50,7 +50,7 @@ being(CircleName, {being, _L, BeingName, Fields, Attrs, Clauses}) ->
                 commons = Commons, counter = 0},
 
     Source = [
-        header(Module, CircleName, BeingName),
+        header(Module, CircleName, BeingName, Attrs),
         exports(Clauses),
         record(Fields, Attrs),
         api(Clauses),
@@ -69,12 +69,18 @@ being(CircleName, {being, _L, BeingName, Fields, Attrs, Clauses}) ->
 %% Antet, exporturi, inregistrare
 %%====================================================================
 
-header(Module, CircleName, BeingName) ->
+header(Module, CircleName, BeingName, Attrs) ->
+    %% `grace' nu are unde ajunge inca -- e `shutdown' din specificatia de
+    %% copil, iar `communion' nu e in subsetul Fazei 3. Il pastram ca atribut
+    %% de modul in loc sa-l pierdem: o declaratie fara efect erodeaza
+    %% increderea in toate celelalte.
+    Grace = attr(grace, Attrs, 5000),
     io_lib:format(
       "%%% Generat de Bahmet 27. NU EDITA -- schimba sursa .b27 si recompileaza.~n"
       "%%% Cerc: ~ts   Fiinta: ~ts~n"
       "-module(~s).~n"
-      "-behaviour(gen_server).~n~n", [CircleName, BeingName, Module]).
+      "-behaviour(gen_server).~n"
+      "-bahmet_grace(~p).~n~n", [CircleName, BeingName, Module, Grace]).
 
 exports(Clauses) ->
     Api = [io_lib:format("~s/~p", [M, arity(P, G) + 1])
@@ -211,19 +217,30 @@ infos(Clauses, Ctx) ->
 %%====================================================================
 
 terminate_fun(Clauses) ->
-    Gives = has_completion(Clauses) orelse gives_on_release(Clauses),
-    Body = case Gives of
+    Body = case gives_on_exit(Clauses) of
                true -> "offer_up(S)";
                false -> "ok"
            end,
+    %% Clauza de ruptura se GENEREAZA din ce a scris autorul, nu se codifica
+    %% rigid. Verificatorul cere ca decizia sa fie luata; ar fi fost mai rau
+    %% decat sa nu intrebam daca apoi am fi ignorat raspunsul.
+    {BrokenVar, BrokenBody, BrokenWhy} =
+        case broken_gives(Clauses) of
+            true ->
+                {"S", "offer_up(S)",
+                 "%% Ruptura: autorul a cerut explicit sa se daruiasca si asa.\n"};
+            false ->
+                {"_S", "ok",
+                 "%% Ruptura: NU daruieste. O stare pe jumatate scrisa ar otravi\n"
+                 "%% tacut fiecare intuitie viitoare a fiecarei fiinte.\n"}
+        end,
     ["%% Implinire: drumul dus pana la capat.\n"
      "terminate(normal, S) -> ", Body, ";\n"
      "%% Retragere altruista: daruieste si cand plecarea nu a fost alegerea ei.\n"
      "terminate(shutdown, S) -> ", Body, ";\n"
-     "terminate({shutdown, _Why}, S) -> ", Body, ";\n"
-     "%% Ruptura: NU daruieste. O stare pe jumatate scrisa ar otravi tacut\n"
-     "%% fiecare intuitie viitoare a fiecarei fiinte.\n"
-     "terminate(_Broken, _S) -> ok.\n\n"].
+     "terminate({shutdown, _Why}, S) -> ", Body, ";\n",
+     BrokenWhy,
+     "terminate(_Broken, ", BrokenVar, ") -> ", BrokenBody, ".\n\n"].
 
 code_change() ->
     "code_change(_OldVsn, S, _Extra) -> {ok, S}.\n\n".
@@ -239,7 +256,7 @@ format_status(Secret) ->
       "format_status(Status) -> Status.\n\n", [Secret]).
 
 helpers(Secret, Commons, Clauses) ->
-    Give = case has_completion(Clauses) orelse gives_on_release(Clauses) of
+    Give = case gives_on_exit(Clauses) orelse broken_gives(Clauses) of
                false -> "";
                true ->
                    io_lib:format(
@@ -341,20 +358,32 @@ slug(Bin) ->
     Lower = string:lowercase(unicode:characters_to_list(Bin)),
     [case C of $. -> $_; _ -> C end || C <- Lower].
 
+%% Campul daruit -- pe orice cale de iesire, nu doar la `completion'. E si
+%% campul redactat in jurnale: ce merita daruit deliberat e exact ce nu are
+%% voie sa se scurga din intamplare.
 completion_target(Clauses) ->
-    Found = [{Field, Target}
-             || {upon, _, _, _, _, {body, _, {completion, _, {var, _, Field}, Target}}} <- Clauses],
-    case Found of
+    Given =
+        [{F, C} || {upon, _, _, _, _, {body, _, {completion, _, {var, _, F}, C}}} <- Clauses]
+        ++ [{F, undefined} || {upon, _, _, _, _, {body, _, {release, _, quietly, {var, _, F}}}} <- Clauses]
+        ++ [{F, undefined} || {broken, _, {body, _, {release, _, quietly, {var, _, F}}}} <- Clauses],
+    case Given of
         [{Field, Target} | _] -> {Field, Target};
         [] -> {undefined, undefined}
     end.
 
-has_completion(Clauses) ->
-    [] =/= [C || C = {upon, _, _, _, _, {body, _, {completion, _, _, _}}} <- Clauses].
+%% Daruieste pe caile normale de iesire (implinire sau retragere linistita)?
+gives_on_exit(Clauses) ->
+    lists:any(fun({upon, _, _, _, _, {body, _, {completion, _, _, _}}}) -> true;
+                 ({upon, _, _, _, _, {body, _, {release, _, quietly, E}}}) -> E =/= undefined;
+                 (_) -> false
+              end, Clauses).
 
-gives_on_release(Clauses) ->
-    [] =/= [C || C = {upon, _, _, _, _, {body, _, {release, _, quietly, E}}} <- Clauses,
-                 E =/= undefined].
+%% Daruieste si cand s-a rupt? Raspunsul il da autorul, nu compilatorul.
+broken_gives(Clauses) ->
+    lists:any(fun({broken, _, {body, _, {release, _, quietly, E}}}) -> E =/= undefined;
+                 ({broken, _, {body, _, {completion, _, _, _}}}) -> true;
+                 (_) -> false
+              end, Clauses).
 
 uses_intuit(Clauses) ->
     lists:any(fun(C) -> has_intuit(C) end, Clauses).
