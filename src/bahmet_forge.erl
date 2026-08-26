@@ -40,7 +40,12 @@
 
 -spec circle(tuple()) -> [{module(), binary()}].
 circle({circle, _Line, CircleName, Decls}) ->
-    [being(CircleName, B) || B = {being, _, _, _, _, _} <- Decls].
+    lists:flatten([
+        [being(CircleName, B) || B = {being, _, _, _, _, _} <- Decls],
+        [gathering(CircleName, G) || G = {gathering, _, _, _, _, _} <- Decls],
+        [communion(CircleName, C, Decls) || C = {communion, _, _, _, _, _} <- Decls],
+        rites(CircleName, Decls)
+    ]).
 
 being(CircleName, {being, _L, BeingName, Fields, Attrs, Clauses}) ->
     Module = module_name(CircleName, BeingName),
@@ -56,7 +61,7 @@ being(CircleName, {being, _L, BeingName, Fields, Attrs, Clauses}) ->
         api(Clauses),
         init_fun(Clauses, Base),
         casts(Clauses, Base),
-        calls(),
+        calls(Clauses, Base),
         infos(Clauses, Base),
         terminate_fun(Clauses),
         code_change(),
@@ -190,9 +195,25 @@ cast({upon, _L, Message, Params, Giver, Body}, Ctx) ->
     ["handle_cast(", Pattern, ", S0) ->\n", Lines,
      "    ", terminator(Body, Final), ";\n"].
 
-calls() ->
-    ["handle_call(_Request, _From, S) ->\n"
+calls(Clauses, Ctx) ->
+    [[ask(C, Ctx) || C = {ask, _, _, _, _} <- Clauses],
+     "handle_call(_Request, _From, S) ->\n"
      "    {reply, {error, unknown_request}, S, S#state.patience}.\n\n"].
+
+%% `ask' e singura forma sincrona, si gramatica a impus deja `within'. Aici
+%% doar traducem: limita declarata in sursa devine limita reala a apelantului.
+ask({ask, _L, Message, _Within, Body}, Ctx) ->
+    {Lines, Final} = statements(Body, Ctx#ctx{visible = [], counter = 0}),
+    {body, _Stmts, Terminator} = Body,
+    Answer = case Terminator of
+                 {answer, _, Expr} ->
+                     io_lib:format("    Answer = ~s,~n",
+                                   [expression(Expr, Ctx, Final)]);
+                 _ ->
+                     "    Answer = ok,\n"
+             end,
+    ["handle_call(", atom_to_list(Message), ", _From, S0) ->\n", Lines, Answer,
+     io_lib:format("    {reply, Answer, ~s, ~s#state.patience};~n", [Final, Final])].
 
 infos(Clauses, Ctx) ->
     Silence = case [C || C = {upon, _, silence, _, _, _} <- Clauses] of
@@ -317,7 +338,9 @@ terminator({body, _, {completion, _, _, _}}, S) ->
 terminator({body, _, {release, _, quietly, _}}, S) ->
     io_lib:format("{stop, {shutdown, silence}, ~s}", [S]);
 terminator({body, _, {release, _, withholding, _}}, S) ->
-    io_lib:format("{stop, {shutdown, withheld}, ~s}", [S]).
+    io_lib:format("{stop, {shutdown, withheld}, ~s}", [S]);
+terminator({body, _, {answer, _, _}}, S) ->
+    io_lib:format("{noreply, ~s, ~s#state.patience}", [S, S]).
 
 %%====================================================================
 %% Expresii
@@ -325,6 +348,8 @@ terminator({body, _, {release, _, withholding, _}}, S) ->
 
 expression({intuit, _L, _Ground, Inner}, Ctx, S) ->
     io_lib:format("intuit_(~s)", [expression(Inner, Ctx, S)]);
+expression({reflect, _L, _Ground}, _Ctx, _S) ->
+    "bahmet_deep:reflect(bahmet_ground:ground())";
 expression({add, _L, Left, Right}, Ctx, S) ->
     io_lib:format("(~s + ~s)", [expression(Left, Ctx, S), expression(Right, Ctx, S)]);
 expression({call, _L, Name, Args}, Ctx, S) ->
@@ -354,6 +379,7 @@ var_name(Atom) ->
 module_name(CircleName, BeingName) ->
     list_to_atom(lists:flatten([slug(CircleName), "_", slug(BeingName)])).
 
+slug(Bin) when is_atom(Bin) -> slug(atom_to_binary(Bin, utf8));
 slug(Bin) ->
     Lower = string:lowercase(unicode:characters_to_list(Bin)),
     [case C of $. -> $_; _ -> C end || C <- Lower].
@@ -402,3 +428,284 @@ expr_has_intuit({intuit, _, _, _}) -> true;
 expr_has_intuit({add, _, L, R}) -> expr_has_intuit(L) orelse expr_has_intuit(R);
 expr_has_intuit({call, _, _, Args}) -> lists:any(fun expr_has_intuit/1, Args);
 expr_has_intuit(_) -> false.
+
+%%====================================================================
+%% ADUNAREA -- supervizor dinamic
+%%
+%% Aici scheletul scris de mana in Faza 1 (bahmet_council_sup) devine iesire
+%% de compilator. Cele trei chei OTP care fac „implinirea" sa fie structurala
+%% -- `transient', `significant', `auto_shutdown' -- nu mai sunt scrise de un
+%% om care si le aminteste, ci deduse din `harmony', `forbearance' si
+%% `completes when'.
+%%====================================================================
+
+gathering(CircleName, {gathering, _L, Name, Harmony, Forbearance, Rule}) ->
+    Module = sup_name(CircleName, Name),
+    {harmony, _, Strategy} = Harmony,
+    {forbearance, _, Intensity, Period} = Forbearance,
+    AutoShutdown = case Rule of
+                       undefined -> "never";
+                       {completes, _, _} -> "all_significant"
+                   end,
+    Source =
+        [io_lib:format(
+           "%%% Generat de Bahmet 27. NU EDITA.~n"
+           "%%% Adunarea `~ts' din cercul `~ts'.~n"
+           "-module(~s).~n"
+           "-behaviour(supervisor).~n~n"
+           "-export([start_link/0, birth/2, present/0, await_completion/1, init/1]).~n~n"
+           "start_link() ->~n"
+           "    supervisor:start_link({local, ?MODULE}, ?MODULE, []).~n~n"
+           "init([]) ->~n"
+           "    SupFlags = #{strategy => ~s,~n"
+           "                 intensity => ~p,~n"
+           "                 period => ~p,~n"
+           %% `all_significant': intregul isi recunoaste propria implinire PRIN
+           %% implinirea partilor. Nimeni nu numara, nimeni nu sondeaza.
+           "                 auto_shutdown => ~s},~n"
+           "    %% Pornim goi. Un cerc nu se naste plin -- el se aduna.~n"
+           "    {ok, {SupFlags, []}}.~n~n",
+           [Name, CircleName, Module, Strategy, Intensity, Period div 1000, AutoShutdown]),
+         birth_fun(),
+         present_fun(),
+         await_fun()],
+    {Module, unicode:characters_to_binary(Source)}.
+
+birth_fun() ->
+    %% `grace' isi gaseste in sfarsit locul. Fiinta si-l poarta ca atribut de
+    %% modul, iar adunarea il citeste: ragazul declarat in sursa devine
+    %% `shutdown' in specificatia de copil.
+    "birth(Module, Args) ->\n"
+    "    %% Identitatea e un intreg unic, NU un atom: tabela de atomi nu se\n"
+    "    %% colecteaza niciodata, iar un sistem care naste liber si-ar sapa\n"
+    "    %% groapa lent, murind brusc luni mai tarziu.\n"
+    "    Id = {born, erlang:unique_integer([positive, monotonic])},\n"
+    "    Grace = case lists:keyfind(bahmet_grace, 1, Module:module_info(attributes)) of\n"
+    "                {bahmet_grace, [G]} -> G;\n"
+    "                _ -> 5000\n"
+    "            end,\n"
+    "    Spec = #{id => Id,\n"
+    "             start => {Module, start_link, [Id, Args]},\n"
+    "             %% `transient': implinirea nu e esec. Terminarea normala nu\n"
+    "             %% se reporneste -- supervizorul respecta lucrul terminat.\n"
+    "             restart => transient,\n"
+    "             significant => true,\n"
+    "             shutdown => Grace,\n"
+    "             type => worker,\n"
+    "             modules => [Module]},\n"
+    "    supervisor:start_child(?MODULE, Spec).\n\n".
+
+present_fun() ->
+    "%% Cine e viu ACUM. Un copil `transient' implinit ramane in lista cu\n"
+    "%% pid-ul `undefined': supervizorul isi aminteste ca a existat, dar nu\n"
+    "%% il reinvie. Raspundem la „cine e prezent\", nu la „cine a fost\".\n"
+    "present() ->\n"
+    "    [Pid || {_Id, Pid, _Type, _Mods} <- supervisor:which_children(?MODULE),\n"
+    "            is_pid(Pid)].\n\n".
+
+await_fun() ->
+    "%% Asteptam prin monitorizare, nu prin sondare. A intreba repetat „ai\n"
+    "%% terminat?\" e nerabdare deghizata in cod; un monitor costa zero pana\n"
+    "%% in clipa in care chiar se intampla ceva.\n"
+    "await_completion(Timeout) ->\n"
+    "    case whereis(?MODULE) of\n"
+    "        undefined -> complete;\n"
+    "        Pid ->\n"
+    "            Ref = erlang:monitor(process, Pid),\n"
+    "            receive\n"
+    "                {'DOWN', Ref, process, Pid, _Reason} -> complete\n"
+    "            after Timeout ->\n"
+    "                erlang:demonitor(Ref, [flush]),\n"
+    "                {timeout, Pid}\n"
+    "            end\n"
+    "    end.\n".
+
+%%====================================================================
+%% COMUNIUNEA -- perspectiva globala
+%%
+%% Ordinea copiilor NU e stilistica: e graful de dependenta, exact asa cum a
+%% scris-o autorul in `tend'. `rest_for_one' o transforma in politica de
+%% repornire, iar compilatorul nu are voie sa o rearanjeze.
+%%====================================================================
+
+communion(CircleName, {communion, _L, Name, Harmony, Forbearance, Tends}, Decls) ->
+    Module = sup_name(CircleName, Name),
+    {harmony, _, Strategy} = Harmony,
+    {forbearance, _, Intensity, Period} = Forbearance,
+    Children = [child(CircleName, T, Decls) || T <- Tends],
+    Source =
+        [io_lib:format(
+           "%%% Generat de Bahmet 27. NU EDITA.~n"
+           "%%% Comuniunea `~ts' din cercul `~ts'.~n"
+           "-module(~s).~n"
+           "-behaviour(supervisor).~n~n"
+           "-export([start_link/0, init/1]).~n~n"
+           "start_link() ->~n"
+           "    supervisor:start_link({local, ?MODULE}, ?MODULE, []).~n~n"
+           "init([]) ->~n"
+           "    SupFlags = #{strategy => ~s,~n"
+           %% Ingaduinta marginita: cand pragul e depasit, supervizorul renunta
+           %% la propria autoritate si preda situatia unei vederi mai largi.
+           "                 intensity => ~p,~n"
+           "                 period => ~p,~n"
+           "                 auto_shutdown => never},~n"
+           "    Children = [~n",
+           [Name, CircleName, Module, Strategy, Intensity, Period div 1000]),
+         string:join(Children, ",\n"),
+         "\n    ],\n"
+         "    {ok, {SupFlags, Children}}.\n"],
+    {Module, unicode:characters_to_binary(Source)}.
+
+child(CircleName, {tend, _L, Target, Lifetime}, Decls) ->
+    {Id, Start, Type, Shutdown} = tend_target(CircleName, Target, Decls),
+    lists:flatten(io_lib:format(
+      "        #{id => ~s,~n"
+      "          start => {~s, start_link, []},~n"
+      "          restart => ~s,~n"
+      "          shutdown => ~s,~n"
+      "          type => ~s,~n"
+      "          modules => [~s]}",
+      [Id, Start, restart_of(Lifetime), Shutdown, Type, Start])).
+
+%% Temeliile si bunurile comune se leaga la modulele de rulare scrise de mana;
+%% adunarile, la supervizorul generat pentru ele.
+tend_target(_CircleName, {small, Name}, Decls) ->
+    case [C || {commons, _, C, _} <- Decls, C =:= Name] of
+        [_ | _] -> {"bahmet_commons", "bahmet_commons", "worker", "5000"};
+        [] -> {"bahmet_ground", "bahmet_ground", "worker", "5000"}
+    end;
+tend_target(CircleName, {great, Name}, _Decls) ->
+    Module = atom_to_list(sup_name(CircleName, Name)),
+    %% `shutdown => infinity' e obligatoriu pentru copiii de tip supervizor:
+    %% nu avem dreptul sa punem un cronometru peste plecarea altora.
+    {Module, Module, "supervisor", "infinity"}.
+
+restart_of(always) -> "permanent";
+restart_of(while_needed) -> "transient";
+restart_of(once) -> "temporary".
+
+%%====================================================================
+%% RITURILE
+%%====================================================================
+
+rites(CircleName, Decls) ->
+    case [R || R = {rite, _, _, _, _} <- Decls] of
+        [] -> [];
+        Rites -> [rites_module(CircleName, Rites, Decls)]
+    end.
+
+rites_module(CircleName, Rites, Decls) ->
+    Module = list_to_atom(lists:flatten([slug(CircleName), "_rites"])),
+    Exports = [io_lib:format("~s/~p", [N, length(P)]) || {rite, _, N, P, _} <- Rites],
+    Functions = [rite_fun(CircleName, R, Decls) || R <- Rites],
+    %% Emitem doar ajutoarele chemate. O functie nefolosita ar fi un
+    %% avertisment, iar cod generat cu avertismente e cod generat prost.
+    Body = unicode:characters_to_binary(Functions),
+    Helpers =
+        [["tensor_origin(N) -> lists:duplicate(N, 1.0 / N).\n\n"]
+         || binary:match(Body, <<"tensor_origin(">>) =/= nomatch]
+        ++ [["intuit_(Offering) ->\n"
+             "    {ok, Result} = bahmet_deep:intuit(bahmet_ground:ground(), Offering),\n"
+             "    Result.\n"]
+            || binary:match(Body, <<"intuit_(">>) =/= nomatch],
+    Source =
+        [io_lib:format(
+           "%%% Generat de Bahmet 27. NU EDITA.~n"
+           "%%% Riturile cercului `~ts'.~n"
+           "-module(~s).~n~n"
+           "-export([~s]).~n~n",
+           [CircleName, Module, string:join(Exports, ", ")]),
+         Body, Helpers],
+    {Module, unicode:characters_to_binary(Source)}.
+
+rite_fun(CircleName, {rite, _L, Name, Params, Body}, Decls) ->
+    Vars = [var_name(N) || {param, _, N, _} <- Params],
+    Env = #{circle => CircleName, decls => Decls},
+    {body, Stmts, Terminator} = Body,
+    [io_lib:format("~s(~s) ->~n", [Name, string:join(Vars, ", ")]),
+     [rite_stmt(S, Env, "    ") || S <- Stmts],
+     "    ", rite_answer(Terminator, Env), ".\n\n"].
+
+rite_stmt({'let', _L, Name, {birth, _, Being, Gathering, Args}}, Env, Indent) ->
+    #{circle := Circle} = Env,
+    io_lib:format("~s{ok, ~s} = ~s:birth(~s, [~s]),~n",
+                  [Indent, var_name(Name),
+                   sup_name(Circle, Gathering),
+                   module_name(Circle, Being),
+                   string:join([rite_expr(A, Env) || A <- Args], ", ")]);
+rite_stmt({'let', _L, Name, Expr}, Env, Indent) ->
+    io_lib:format("~s~s = ~s,~n", [Indent, var_name(Name), rite_expr(Expr, Env)]);
+rite_stmt({offer, _L, {call, _, Message, Args}, Target}, Env, Indent) ->
+    io_lib:format("~sgen_server:cast(~s, ~s),~n",
+                  [Indent, rite_expr(Target, Env), payload(Message, Args, Env)]);
+rite_stmt({foreach, _L, Name, Over, Inner}, Env, Indent) ->
+    [io_lib:format("~slists:foreach(fun(~s) ->~n", [Indent, var_name(Name)]),
+     [rite_stmt(S, Env, Indent ++ "    ") || S <- Inner],
+     io_lib:format("~s    ok~n~send, ~s),~n", [Indent, Indent, rite_expr(Over, Env)])];
+rite_stmt({await, _L, Gathering, Within}, Env, Indent) ->
+    #{circle := Circle} = Env,
+    %% Un `await' care expira nu e „poate a mers": e un rit care nu s-a
+    %% implinit. Spunem asta zgomotos, cu numele adunarii in eroare.
+    io_lib:format("~scase ~s:await_completion(~p) of~n"
+                  "~s    complete -> ok;~n"
+                  "~s    Otherwise -> erlang:error({await_failed, ~p, Otherwise})~n"
+                  "~send,~n",
+                  [Indent, sup_name(Circle, Gathering), Within,
+                   Indent, Indent, Gathering, Indent]).
+
+%% Forma unui mesaj e determinata de NUMELE lui in cerc, nu de locul din care
+%% e trimis. Daca fiinta care il primeste a scris `from giver', expeditorul
+%% TREBUIE sa se numeasca -- altfel tuplul nu se potriveste, iar darul cade
+%% tacut in clauza de mesaje neintelese. Fara nicio eroare, fara niciun semn.
+payload(Message, Args, Env) ->
+    #{decls := Decls} = Env,
+    Rendered = [lists:flatten(rite_expr(A, Env)) || A <- Args],
+    Parts = Rendered ++ ["self()" || wants_giver(Message, Decls)],
+    case Parts of
+        [] -> atom_to_list(Message);
+        _ -> lists:flatten(io_lib:format("{~s, ~s}", [Message, string:join(Parts, ", ")]))
+    end.
+
+wants_giver(Message, Decls) ->
+    lists:any(
+      fun({being, _, _, _, _, Clauses}) ->
+              lists:any(fun({upon, _, M, _, Giver, _}) ->
+                                M =:= Message andalso Giver =/= undefined;
+                           (_) -> false
+                        end, Clauses);
+         (_) -> false
+      end, Decls).
+
+rite_answer({answer, _L, Expr}, Env) -> rite_expr(Expr, Env);
+rite_answer(_Other, _Env) -> "ok".
+
+rite_expr({birth, _L, Being, Gathering, Args}, Env) ->
+    #{circle := Circle} = Env,
+    io_lib:format("~s:birth(~s, [~s])",
+                  [sup_name(Circle, Gathering), module_name(Circle, Being),
+                   string:join([rite_expr(A, Env) || A <- Args], ", ")]);
+rite_expr({reach, _L, Gathering, present}, Env) ->
+    #{circle := Circle} = Env,
+    io_lib:format("~s:present()", [sup_name(Circle, Gathering)]);
+rite_expr({builtin, _L, tensor, origin, [Arg]}, Env) ->
+    io_lib:format("tensor_origin(~s)", [rite_expr(Arg, Env)]);
+rite_expr({intuit, _L, _Ground, Inner}, Env) ->
+    io_lib:format("intuit_(~s)", [rite_expr(Inner, Env)]);
+rite_expr({reflect, _L, _Ground}, _Env) ->
+    "bahmet_deep:reflect(bahmet_ground:ground())";
+rite_expr({add, _L, Left, Right}, Env) ->
+    io_lib:format("(~s + ~s)", [rite_expr(Left, Env), rite_expr(Right, Env)]);
+rite_expr({call, _L, Name, Args}, Env) ->
+    io_lib:format("{~s~s}", [Name, [[", ", rite_expr(A, Env)] || A <- Args]]);
+rite_expr({var, _L, Name}, Env) ->
+    #{decls := Decls} = Env,
+    %% Un `commons' numit intr-o expresie inseamna „ce s-a adunat acolo".
+    case [C || {commons, _, C, _} <- Decls, C =:= Name] of
+        [_ | _] -> io_lib:format("bahmet_commons:~s()", [Name]);
+        [] -> var_name(Name)
+    end;
+rite_expr({lit, _L, void}, _Env) -> "undefined";
+rite_expr({lit, _L, Value}, _Env) -> io_lib:format("~p", [Value]).
+
+sup_name(CircleName, Name) ->
+    list_to_atom(lists:flatten([slug(CircleName), "_", slug(Name), "_sup"])).

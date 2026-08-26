@@ -1,8 +1,8 @@
-# hearth.b27 -- primul program Bahmet 27 care chiar compileaza.
+# hearth.b27 -- cercul mic, dar întreg.
 #
-# Subsetul Fazei 3: circle, ground, commons, being. Restul gramaticii din
-# GRAMMAR.md urmeaza, dar bucla sursa -> AST -> invariante -> modul Erlang
-# este completa aici.
+# Perechea lui contemplation.b27: aceleași trăsături, mai puține construcții.
+# Nu are `ask`, nu are `await` — dar are tot ce trebuie ca o ființă să poată
+# veni la viață, fiindcă altfel compilatorul o refuză.
 
 circle Hearth
 
@@ -48,6 +48,31 @@ circle Hearth
       release withholding insight
     end
 
+  end
+
+  # Fără adunare, `Keeper` ar fi cod pentru cineva care nu se poate întâmpla.
+  # Compilatorul spune asta acum, nu peste șase luni.
+  gathering Circle
+    harmony     one_for_one
+    forbearance 5 within 60s
+    completes when all present are complete
+  end
+
+  communion Home
+    harmony     rest_for_one
+    forbearance 3 within 60s
+
+    tend deep   always
+    tend wisdom always
+    tend Circle while_needed
+  end
+
+  rite kindle(questions : list of text) ->
+    for each q in questions ->
+      let one = birth Keeper into Circle with (q)
+      offer offering(tensor.origin(256)) to one
+    end
+    answer wisdom
   end
 
 end

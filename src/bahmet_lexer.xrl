@@ -1,8 +1,8 @@
 %%%-------------------------------------------------------------------
 %%% Bahmet 27 -- analizorul lexical (leex).
 %%%
-%%% Subsetul Fazei 3: `circle', `ground', `commons', `being' cu `carries',
-%%% atribute si clauze. Restul gramaticii din dsl/GRAMMAR.md urmeaza.
+%%% Gramatica intreaga: `circle', `ground', `commons', `being', `communion',
+%%% `gathering', `rite'.
 %%%
 %%% Cuvintele-cheie sunt scumpe intr-un limbaj mic: fiecare cuvant rezervat
 %%% e un nume pe care dezvoltatorul nu-l mai poate folosi. De aceea
@@ -44,12 +44,19 @@ Rules.
 \]                                   : {token, {']', TokenLine}}.
 =                                    : {token, {'=', TokenLine}}.
 \+                                   : {token, {'+', TokenLine}}.
+\.                                   : {token, {'.', TokenLine}}.
 
 Erlang code.
 
 -export([keywords/0]).
 
-%% Douazeci si sase de cuvinte. Fiecare a trebuit sa-si justifice locul.
+%% Patruzeci si cinci de cuvinte. Fiecare a trebuit sa-si justifice locul.
+%%
+%% Ce NU e aici conteaza la fel de mult: `one_for_one', `always',
+%% `while_needed', `all', `present', `are', `complete', `dimension', `seed'
+%% raman identificatori obisnuiti, validati de bahmet_check. Un cuvant
+%% rezervat e un nume pe care dezvoltatorul nu-l mai poate folosi niciodata;
+%% `present' ca cheie ar fi facut imposibil un camp numit `present'.
 keywords() ->
     ['circle', 'being', 'carries', 'end',
      'patience', 'grace',
@@ -57,9 +64,12 @@ keywords() ->
      'keep', 'completion', 'merging', 'into',
      'release', 'quietly', 'giving', 'withholding',
      'when', 'broken',
-     'offer', 'to', 'intuit',
+     'offer', 'to', 'intuit', 'reflect',
      'commons', 'ground',
-     'text', 'count', 'tensor', 'void'].
+     'communion', 'gathering', 'harmony', 'forbearance', 'tend', 'completes',
+     'rite', 'let', 'for', 'each', 'in', 'birth', 'await', 'answer',
+     'ask', 'within',
+     'text', 'count', 'tensor', 'list', 'of', 'void'].
 
 classify(Chars, Line) ->
     %% `list_to_atom' pe intrare arbitrara ar fi o scurgere in tabela de
