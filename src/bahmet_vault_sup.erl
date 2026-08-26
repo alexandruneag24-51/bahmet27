@@ -28,8 +28,8 @@
 %%%  DE CE `rest_for_one`: ORDINEA ESTE IERARHIA DE INCREDERE
 %%% ═══════════════════════════════════════════════════════════════════
 %%%
-%%%   bahmet_entropy ──► bahmet_keyring ──► bahmet_rotation ──► bahmet_sentinel
-%%%   (sursa)            (custodia)         (igiena)            (observatorul)
+%%%   bahmet_entropy ─► bahmet_dek_store ─► bahmet_keyring ─► bahmet_rotation ─► bahmet_sentinel
+%%%   (sursa)           (starea durabila)   (custodia)         (igiena)            (observatorul)
 %%%
 %%% Cade entropia  -> cad TOTI. Cheile generate dupa o sursa suspecta sunt
 %%%                   suspecte, iar cei care le tin nu au cum sa afle singuri.
@@ -117,7 +117,24 @@ init([]) ->
         modules  => [bahmet_keyring]
     },
 
-    %% ── 3. ROTATIA — IERTARE MODERATA ───────────────────────────────
+    %% ── 3. DEPOZITUL — IERTARE MICA ─────────────────────────────────
+    %%
+    %% Catalogul DEK-urilor, pe disc. Sta INAINTEA rotatiei fiindca rotatia
+    %% nu are ce itera fara el, si DUPA custodie fiindca aici se persista
+    %% generatia curenta pe care keyring-ul o citeste la pornire.
+    %%
+    %% Asteapta: keyring-ul citeste `generation()' din depozit la `init'.
+    %% Deci depozitul trebuie sa fie deja viu -- vezi ordinea reala mai jos.
+    Store = #{
+        id       => bahmet_dek_store,
+        start    => {bahmet_dek_store, start_link, []},
+        restart  => permanent,
+        shutdown => ?GRACE,
+        type     => worker,
+        modules  => [bahmet_dek_store]
+    },
+
+    %% ── 4. ROTATIA — IERTARE MODERATA ───────────────────────────────
     %%
     %% Igiena periodica: KEK nou, reimpachetarea DEK-urilor, distrugerea
     %% celui vechi. O rotatie intrerupta la mijloc nu e o catastrofa,
@@ -135,7 +152,7 @@ init([]) ->
         modules  => [bahmet_rotation]
     },
 
-    %% ── 4. SANTINELA — CEA MAI IERTATA ──────────────────────────────
+    %% ── 5. SANTINELA — CEA MAI IERTATA ──────────────────────────────
     %%
     %% `transient', ultima in ordine, si deliberat NEESENTIALA.
     %%
@@ -156,4 +173,8 @@ init([]) ->
         modules  => [bahmet_sentinel]
     },
 
-    {ok, {SupFlags, [Entropy, Keyring, Rotation, Sentinel]}}.
+    %% ORDINEA E GRAFUL DE DEPENDENTA, nu ordinea in care le-am scris:
+    %% entropia sustine totul; depozitul e starea durabila; custodia se
+    %% RECONSTRUIESTE din radacina plus generatia citita din depozit; rotatia
+    %% are nevoie de amandoua; santinela de niciuna.
+    {ok, {SupFlags, [Entropy, Store, Keyring, Rotation, Sentinel]}}.

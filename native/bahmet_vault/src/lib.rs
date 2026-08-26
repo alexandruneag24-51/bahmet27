@@ -34,6 +34,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
+use hkdf::Hkdf;
 use rand_core::{OsRng, RngCore};
 use rustler::{Atom, Binary, Env, NifResult, OwnedBinary, Resource, ResourceArc};
 use sha2::{Digest, Sha256};
@@ -210,6 +211,52 @@ fn entropy_is_healthy() -> Result<bool, VaultError> {
     Ok(!identical && !all_zero)
 }
 
+/// Primește material din exterior. **Singura poartă de INTRARE.**
+///
+/// Există fiindcă rădăcina trebuie să vină de undeva: un HSM, un KMS, un
+/// operator la boot. Nu contrazice regula „cheile nu traversează frontiera" —
+/// aceea e despre IEȘIRE. Poți pune chei înăuntru; nu poți scoate niciuna.
+/// Frontiera de custodie nu e un zid, e o supapă.
+///
+/// Notă onestă: octeții au fost deja un binar Erlang înainte să ajungă aici,
+/// deci au atins heap-ul BEAM și nu pot fi șterși de acolo. Forma corectă în
+/// producție e HSM → Rust direct, fără ocol prin mașina virtuală.
+fn adopt_material(material: &[u8], generation: u32) -> Result<KeyHandle, VaultError> {
+    if material.len() != KEY_BYTES {
+        return Err(VaultError::BadKeyLength);
+    }
+    let mut bytes = [0u8; KEY_BYTES];
+    bytes.copy_from_slice(material);
+    Ok(KeyHandle::from_material(&mut bytes, generation))
+}
+
+/// **Derivarea subcheilor.** `KEK_n = HKDF-SHA256(rădăcină, "kek" ‖ n)`.
+///
+/// Aceasta e piesa care face rotația recuperabilă. O cheie de generație
+/// generată aleator și pierdută la un crash ar distruge tot ce apucase să
+/// rescrie. Una derivată poate fi re-obținută oricând, din aceeași rădăcină,
+/// pe orice mașină, după orice repornire.
+///
+/// Consecința practică: o rotație întreruptă se reia singură. Nu există jurnal
+/// de progres de ținut, fiindcă starea e recalculabilă, nu memorată.
+///
+/// HKDF, nu un hash improvizat: `SHA256(rădăcină ‖ n)` pare echivalent, dar nu
+/// are separarea domeniilor și nici garanțiile de extragere-expandare. Nu
+/// inventăm KDF-uri.
+fn derive_kek(root: &KeyHandle, generation: u32) -> Result<KeyHandle, VaultError> {
+    let hkdf = Hkdf::<Sha256>::new(Some(b"bahmet27/kek/v1"), root.material.as_ref());
+
+    let mut info = [0u8; 7];
+    info[..3].copy_from_slice(b"kek");
+    info[3..].copy_from_slice(&generation.to_be_bytes());
+
+    let mut material = [0u8; KEY_BYTES];
+    hkdf.expand(&info, &mut material)
+        .map_err(|_| VaultError::BadKeyLength)?;
+
+    Ok(KeyHandle::from_material(&mut material, generation))
+}
+
 fn generate_key(generation: u32) -> Result<KeyHandle, VaultError> {
     let mut material = [0u8; KEY_BYTES];
     fill_entropy(&mut material)?;
@@ -307,6 +354,42 @@ fn entropy_health() -> NifResult<(Atom, bool)> {
 #[rustler::nif]
 fn forge_key(generation: u32) -> NifResult<ResourceArc<KeyHandle>> {
     Ok(ResourceArc::new(generate_key(generation)?))
+}
+
+/// Primește material de cheie din afară. **Asimetria e întreaga proiectare.**
+///
+/// Un sistem real trebuie să poată primi o rădăcină de la un HSM, un KMS sau
+/// un operator la boot. Deci materialul are voie să INTRE. Nu are voie să
+/// IASĂ: `import_root` există, `export_root` nu va exista niciodată.
+///
+/// Frontiera de custodie nu e un zid, e o supapă. Ea nu împiedică secretele
+/// să ajungă în Adânc — împiedică ieșirea lor.
+///
+/// AVERTISMENT: binarul primit trăiește pe heap-ul BEAM și nu poate fi șters
+/// sigur de acolo (vezi CRYPTO.md §1). În producție, rădăcina trebuie
+/// alimentată direct în Rust dintr-un HSM, fără să treacă prin Erlang.
+#[rustler::nif]
+fn import_root(material: Binary, generation: u32) -> NifResult<ResourceArc<KeyHandle>> {
+    // Cheamă miezul, nu îl copiază.
+    //
+    // Avea aici o implementare duplicat, iar `adopt_material` rămăsese să fie
+    // apelată doar din teste. Adică probele despre importul rădăcinii
+    // verificau un cod pe care sistemul nu îl executa niciodată: cineva ar fi
+    // putut strica validarea de lungime de aici, iar suita ar fi rămas verde.
+    //
+    // Coaja subțire nu e stil, e condiția ca testele să spună adevărul.
+    Ok(ResourceArc::new(adopt_material(
+        material.as_slice(),
+        generation,
+    )?))
+}
+
+#[rustler::nif]
+fn derive_generation(
+    root: ResourceArc<KeyHandle>,
+    generation: u32,
+) -> NifResult<ResourceArc<KeyHandle>> {
+    Ok(ResourceArc::new(derive_kek(&root, generation)?))
 }
 
 #[rustler::nif]
@@ -538,6 +621,58 @@ mod tests {
         let b = key(1);
         assert_ne!(a.fingerprint, b.fingerprint);
         assert_eq!(a.fingerprint, a.fingerprint);
+    }
+
+    /// Aceeași rădăcină, aceeași cheie -- altfel o repornire ar face
+    /// nedescifrabil tot ce s-a cifrat înainte.
+    #[test]
+    fn radacina_importata_e_reproductibila() {
+        let material = [7u8; KEY_BYTES];
+        let a = adopt_material(&material, 0).unwrap();
+        let b = adopt_material(&material, 0).unwrap();
+        assert_eq!(a.fingerprint, b.fingerprint);
+
+        let sealed = seal_bytes(&a, b"date", b"ctx").unwrap();
+        assert_eq!(&unseal_bytes(&b, &sealed, b"ctx").unwrap()[..], &b"date"[..]);
+    }
+
+    #[test]
+    fn radacina_de_lungime_gresita_refuza() {
+        assert_eq!(adopt_material(&[0u8; 16], 0).unwrap_err(), VaultError::BadKeyLength);
+        assert_eq!(adopt_material(&[], 0).unwrap_err(), VaultError::BadKeyLength);
+    }
+
+    /// Fără determinism, o rotație întreruptă pierde datele deja rescrise.
+    #[test]
+    fn derivarea_e_determinista() {
+        let root = adopt_material(&[7u8; KEY_BYTES], 0).unwrap();
+        assert_eq!(
+            derive_kek(&root, 3).unwrap().fingerprint,
+            derive_kek(&root, 3).unwrap().fingerprint
+        );
+    }
+
+    /// Generații diferite trebuie să fie chei independente: compromiterea
+    /// uneia nu are voie să spună nimic despre celelalte.
+    #[test]
+    fn generatiile_sunt_independente() {
+        let root = adopt_material(&[7u8; KEY_BYTES], 0).unwrap();
+        let a = derive_kek(&root, 1).unwrap();
+        let b = derive_kek(&root, 2).unwrap();
+        assert_ne!(a.fingerprint, b.fingerprint);
+
+        let sealed = seal_bytes(&a, b"date", b"").unwrap();
+        assert_eq!(unseal_bytes(&b, &sealed, b""), Err(VaultError::DecryptFailed));
+    }
+
+    #[test]
+    fn radacini_diferite_dau_subchei_diferite() {
+        let first = adopt_material(&[1u8; KEY_BYTES], 0).unwrap();
+        let second = adopt_material(&[2u8; KEY_BYTES], 0).unwrap();
+        assert_ne!(
+            derive_kek(&first, 1).unwrap().fingerprint,
+            derive_kek(&second, 1).unwrap().fingerprint
+        );
     }
 
     #[test]

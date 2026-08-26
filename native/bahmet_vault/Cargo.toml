@@ -19,6 +19,10 @@ rustler = "0.36"
 # bug-uri criptografice reale stau in orchestrare, nu in primitive.
 chacha20poly1305 = "0.10"   # XChaCha20-Poly1305, nonce de 192 biti
 sha2             = "0.10"   # amprente de audit
+# Derivarea subcheilor de generatie. Folosim HKDF, nu un hash improvizat:
+# SHA256(radacina || n) pare echivalent, dar nu are separarea domeniilor si
+# nici garantiile de extragere-expandare. Nu inventam KDF-uri.
+hkdf             = "0.12"
 rand_core        = { version = "0.6", features = ["getrandom"] }
 
 # Scrieri volatile + bariera de compilator. Fara acest crate, LLVM ar putea

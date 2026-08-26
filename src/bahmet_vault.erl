@@ -25,6 +25,8 @@
 -module(bahmet_vault).
 
 -export([entropy_health/0,
+         import_root/2,
+         derive_generation/2,
          forge_key/1,
          fingerprint/1,
          key_status/1,
@@ -34,7 +36,7 @@
          wrap_key/3,
          unwrap_key/4]).
 
--nifs([entropy_health/0, forge_key/1, fingerprint/1, key_status/1, shred/1,
+-nifs([entropy_health/0, import_root/2, derive_generation/2, forge_key/1, fingerprint/1, key_status/1, shred/1,
        seal/3, unseal/3, wrap_key/3, unwrap_key/4]).
 
 -on_load(init/0).
@@ -63,6 +65,37 @@ entropy_health() -> erlang:nif_error(nif_not_loaded).
 %%====================================================================
 %% Ciclul de viata al cheilor
 %%====================================================================
+
+%% @doc Importa radacina. SINGURA poarta de INTRARE a materialului.
+%%
+%% ASIMETRIA E INTREAGA PROIECTARE. Materialul are voie sa INTRE; nu are voie
+%% sa IASA. `import_root' exista, `export_root' nu va exista niciodata.
+%% Frontiera de custodie nu e un zid, e o supapa.
+%%
+%% Nu contrazice regula „cheile nu traverseaza frontiera" -- aceea e despre
+%% IESIRE. Poti pune chei inauntru; nu poti scoate niciuna. Un seif care nu
+%% poate primi nimic nu e un seif.
+%%
+%% Onest: octetii sunt un binar Erlang inainte sa ajunga aici, deci au atins
+%% heap-ul BEAM si nu pot fi stersi de acolo. Forma corecta in productie e
+%% HSM -> Rust direct. Vezi CRYPTO.md.
+%% `Generation' e explicit, nu presupus zero: radacina si generatia ei sunt
+%% doua fapte diferite, iar un sistem care le confunda va confunda si altele.
+-spec import_root(Material :: binary(), Generation :: non_neg_integer()) ->
+          key() | {error, bad_key_length}.
+import_root(_Material, _Generation) -> erlang:nif_error(nif_not_loaded).
+
+%% @doc Deriva subcheia unei generatii: `KEK_n = HKDF(radacina, "kek" || n)'.
+%%
+%% Piesa care face rotatia recuperabila. O cheie de generatie generata aleator
+%% si pierduta la un crash ar distruge tot ce apucase sa rescrie; una derivata
+%% poate fi re-obtinuta oricand, pe orice masina, dupa orice repornire.
+%%
+%% Consecinta: o rotatie intrerupta se reia singura. Nu exista jurnal de
+%% progres de tinut, fiindca starea e recalculabila, nu memorata.
+-spec derive_generation(Root :: key(), Generation :: non_neg_integer()) ->
+          key() | {error, bad_key_length}.
+derive_generation(_Root, _Generation) -> erlang:nif_error(nif_not_loaded).
 
 -spec forge_key(Generation :: non_neg_integer()) ->
           key() | {error, entropy_unavailable}.
