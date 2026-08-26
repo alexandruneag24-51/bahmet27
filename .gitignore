@@ -9,3 +9,5 @@ erl_crash.dump
 logs/
 *~
 .DS_Store
+*.dets
+bahmet_deks*
