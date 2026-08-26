@@ -1,0 +1,53 @@
+# hearth.b27 -- primul program Bahmet 27 care chiar compileaza.
+#
+# Subsetul Fazei 3: circle, ground, commons, being. Restul gramaticii din
+# GRAMMAR.md urmeaza, dar bucla sursa -> AST -> invariante -> modul Erlang
+# este completa aici.
+
+circle Hearth
+
+  ground deep
+    dimension 256
+    seed      27
+  end
+
+  commons wisdom : tensor[256]
+
+  being Keeper
+
+    carries
+      question  : text
+      insight   : tensor[256] = void
+      offerings : count       = 0
+    end
+
+    patience 30s
+    grace     5s
+
+    awaken with (q : text) ->
+      question <- q
+      keep
+    end
+
+    upon offering(gift : tensor[256]) from giver ->
+      insight   <- intuit deep with gift
+      offerings <- offerings + 1
+      offer thanks(offerings) to giver
+      keep
+    end
+
+    upon calling_home ->
+      completion merging insight into wisdom
+    end
+
+    upon silence ->
+      release quietly giving insight
+    end
+
+    when broken ->
+      release withholding insight
+    end
+
+  end
+
+end
