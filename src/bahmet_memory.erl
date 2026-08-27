@@ -20,12 +20,20 @@
 %%% diferite, iar confuzia dintre ele costa luni.
 %%%
 %%% ═══════════════════════════════════════════════════════════════════
-%%%  ONESTITATE
+%%%  PERSISTAREA: UN SINGUR FISIER, SCRIS ATOMIC
 %%% ═══════════════════════════════════════════════════════════════════
 %%%
-%%% Depozitul e in memorie (RAM), cu persistare simpla pe disc. Pentru zeci de
-%%% mii de bucati e mai mult decat destul si evita inca un serviciu de rulat.
-%%% Peste cateva sute de mii, ai vrea Qdrant sau LanceDB -- vezi RAG.md.
+%%% Vectorii traiesc in Rust, textele aici. Doua jumatati care NU au voie sa se
+%%% desincronizeze -- exact tiparul care a produs fiecare bug serios din acest
+%%% proiect.
+%%%
+%%% De aceea sunt salvate impreuna, intr-un singur fisier, scris intr-un temporar
+%%% si mutat prin `rename'. Redenumirea e atomica pe orice sistem de fisiere
+%%% serios: fie vezi fisierul vechi intreg, fie pe cel nou intreg, niciodata
+%%% ceva la mijloc. Acelasi principiu ca la confirmarea per DEK din rotatie.
+%%%
+%%% Depozitul ramane in RAM in timpul rularii. Pentru zeci de mii de bucati e
+%%% mai mult decat destul; peste cateva sute de mii, vezi RAG.md §6.
 %%%
 %%% Impartirea in bucati e naiva: paragrafe, cu suprapunere. Functioneaza
 %%% surprinzator de bine pe proza; pe cod sau tabele, mai putin.
@@ -36,8 +44,10 @@
 
 -export([start_link/0,
          assimilate/2, assimilate/3,
+         devour/1, devour_url/1,
          recall/1, recall/2,
          forget_source/1,
+         save/0, save/1, load/0, load/1,
          status/0,
          chunk/2]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -61,6 +71,8 @@
     fragments :: #{integer() => #fragment{}},
     next      :: integer()
 }).
+
+-define(SNAPSHOT_VERSION, 1).
 
 %%====================================================================
 %% API
@@ -98,6 +110,39 @@ recall(Question, K) -> gen_server:call(?SERVER, {recall, Question, K}, 60000).
 -spec forget_source(binary()) -> {ok, non_neg_integer()}.
 forget_source(Source) -> gen_server:call(?SERVER, {forget_source, Source}, 60000).
 
+%% @doc Citeste un fisier si il asimileaza. Text, Markdown, PDF sau HTML.
+%%
+%% Sursa devine calea fisierului, deci `forget_source' cu aceeasi cale sterge
+%% exact ce a intrat de acolo.
+-spec devour(file:filename()) -> {ok, non_neg_integer()} | {error, term()}.
+devour(Path) ->
+    case bahmet_scribe:read(Path) of
+        {ok, Text} -> assimilate(unicode:characters_to_binary(Path), Text);
+        {error, Why} -> {error, {scribe, Why}}
+    end.
+
+%% @doc Aduce o pagina web si o asimileaza.
+-spec devour_url(string()) -> {ok, non_neg_integer()} | {error, term()}.
+devour_url(Url) ->
+    case bahmet_scribe:fetch(Url) of
+        {ok, Text} -> assimilate(unicode:characters_to_binary(Url), Text);
+        {error, Why} -> {error, {scribe, Why}}
+    end.
+
+%% @doc Salveaza tot -- vectori si texte -- intr-un singur fisier.
+-spec save() -> ok | {error, term()}.
+save() -> save(snapshot_path()).
+
+-spec save(file:filename()) -> ok | {error, term()}.
+save(Path) -> gen_server:call(?SERVER, {save, Path}, 300000).
+
+%% @doc Incarca o memorie salvata, INLOCUIND-O pe cea curenta.
+-spec load() -> {ok, non_neg_integer()} | {error, term()}.
+load() -> load(snapshot_path()).
+
+-spec load(file:filename()) -> {ok, non_neg_integer()} | {error, term()}.
+load(Path) -> gen_server:call(?SERVER, {load, Path}, 300000).
+
 -spec status() -> map().
 status() -> gen_server:call(?SERVER, status, 5000).
 
@@ -107,14 +152,26 @@ status() -> gen_server:call(?SERVER, status, 5000).
 
 init([]) ->
     process_flag(trap_exit, true),
+    try awaken() catch throw:{stop, Why} -> {stop, Why} end.
+
+awaken() ->
     %% Masuram forma vectorilor, nu o presupunem. Acelasi principiu ca la
     %% `bahmet_entropy': verificam temelia la pornire, nu la prima cerere.
     case bahmet_oracle:dimension() of
         {ok, Dimension} ->
-            Memory = bahmet_recall:open_memory(Dimension),
-            logger:notice("bahmet_memory: vectori de ~p dimensiuni", [Dimension]),
-            {ok, #state{memory = Memory, dimension = Dimension,
-                        fragments = #{}, next = 1}};
+            %% Temelia se verifica la pornire, nu la prima salvare. Altfel ai
+            %% afla ca biblioteca nativa e veche abia dupa ce ai asimilat o
+            %% carte -- si ai pierde-o.
+            ok = case bahmet_recall:verify() of
+                     ok -> ok;
+                     {error, Stale} -> throw({stop, Stale})
+                 end,
+            Fresh = #state{memory = bahmet_recall:open_memory(Dimension),
+                           dimension = Dimension, fragments = #{}, next = 1},
+            %% Daca exista un instantaneu, il luam. Altfel pornim goi -- si NU
+            %% esuam: o memorie goala e o stare valida, un fisier lipsa nu e o
+            %% eroare.
+            {ok, revive(snapshot_path(), Fresh)};
         {error, Why} ->
             %% Fara oracol nu putem vectoriza nimic. Nu pornim pe jumatate.
             {stop, {oracle_unreachable, Why}}
@@ -149,6 +206,15 @@ handle_call({forget_source, Source}, _From, S) ->
     Remaining = maps:without(Doomed, S#state.fragments),
     {reply, {ok, length(Doomed)}, S#state{fragments = Remaining}};
 
+handle_call({save, Path}, _From, S) ->
+    {reply, preserve(Path, S), S};
+
+handle_call({load, Path}, _From, S) ->
+    case resurrect(Path, S#state.dimension) of
+        {ok, Next} -> {reply, {ok, maps:size(Next#state.fragments)}, Next};
+        {error, Why} -> {reply, {error, Why}, S}
+    end;
+
 handle_call(status, _From, S) ->
     Sources = lists:usort([Src || #fragment{source = Src} <- maps:values(S#state.fragments)]),
     Reply = maps:merge(bahmet_recall:status(S#state.memory),
@@ -160,8 +226,92 @@ handle_call(_Request, _From, S) ->
 
 handle_cast(_Msg, S) -> {noreply, S}.
 handle_info(_Info, S) -> {noreply, S}.
-terminate(_Reason, _S) -> ok.
+%% Salvam la plecarea ordonata -- nu si la ruptura. Aceeasi distinctie ca la
+%% contemplator: o stare pe jumatate scrisa, persistata, ar otravi fiecare
+%% pornire viitoare.
+terminate(Reason, S) when Reason =:= normal; Reason =:= shutdown ->
+    _ = preserve(snapshot_path(), S),
+    ok;
+terminate({shutdown, _Why}, S) ->
+    _ = preserve(snapshot_path(), S),
+    ok;
+terminate(_Broken, _S) ->
+    ok.
+
 code_change(_OldVsn, S, _Extra) -> {ok, S}.
+
+%%====================================================================
+%% Persistarea
+%%====================================================================
+
+%% Scriem intr-un temporar si mutam prin `rename'. Redenumirea e atomica pe
+%% orice sistem de fisiere serios: fie vezi fisierul vechi intreg, fie pe cel
+%% nou intreg, niciodata ceva la mijloc.
+preserve(Path, S) ->
+    Term = #{version => ?SNAPSHOT_VERSION,
+             dimension => S#state.dimension,
+             vectors => bahmet_recall:snapshot(S#state.memory),
+             fragments => S#state.fragments,
+             next => S#state.next},
+    Temp = Path ++ ".tmp",
+    ok = filelib:ensure_dir(Path),
+    case file:write_file(Temp, term_to_binary(Term, [{compressed, 6}])) of
+        ok ->
+            case file:rename(Temp, Path) of
+                ok ->
+                    logger:notice("bahmet_memory: ~p fragmente salvate in ~ts",
+                                  [maps:size(S#state.fragments), Path]),
+                    ok;
+                {error, Why} -> {error, {rename, Why}}
+            end;
+        {error, Why} ->
+            {error, {write, Why}}
+    end.
+
+revive(Path, Fresh) ->
+    case resurrect(Path, Fresh#state.dimension) of
+        {ok, Loaded} ->
+            logger:notice("bahmet_memory: ~p fragmente readuse din ~ts",
+                          [maps:size(Loaded#state.fragments), Path]),
+            Loaded;
+        {error, enoent} ->
+            Fresh;
+        {error, Why} ->
+            %% Un instantaneu stricat nu are voie sa opreasca pornirea, dar
+            %% nici sa treaca in tacere: pornim goi si SPUNEM de ce.
+            logger:warning("bahmet_memory: nu pot citi ~ts (~p). Pornesc gol.",
+                           [Path, Why]),
+            Fresh
+    end.
+
+resurrect(Path, Dimension) ->
+    case file:read_file(Path) of
+        {error, Why} ->
+            {error, Why};
+        {ok, Binary} ->
+            try binary_to_term(Binary, [safe]) of
+                #{version := ?SNAPSHOT_VERSION, dimension := Dimension,
+                  vectors := Blob, fragments := Fragments, next := Next} ->
+                    case bahmet_recall:restore(Blob) of
+                        {error, Why} -> {error, {vectors, Why}};
+                        Memory ->
+                            {ok, #state{memory = Memory, dimension = Dimension,
+                                        fragments = Fragments, next = Next}}
+                    end;
+                #{dimension := Other} when Other =/= Dimension ->
+                    %% Ai schimbat modelul de embedding. Vectorii vechi nu mai
+                    %% inseamna nimic in noul spatiu -- si nu e ceva ce putem
+                    %% repara tacut, e ceva ce trebuie sa afli.
+                    {error, {dimension_changed, Other, Dimension}};
+                _ ->
+                    {error, unknown_format}
+            catch
+                _:_ -> {error, corrupt}
+            end
+    end.
+
+snapshot_path() ->
+    application:get_env(bahmet, memory_file, "bahmet_memory.snapshot").
 
 %%====================================================================
 %% Intern

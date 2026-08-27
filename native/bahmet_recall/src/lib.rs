@@ -24,12 +24,18 @@
 //! imposibil de testat cu `cargo test`. Iar cod netestabil în izolare, în
 //! practică, nu e testat deloc.
 
-use rustler::{Atom, NifResult, Resource, ResourceArc};
+use rustler::{Atom, Binary, Env, NifResult, OwnedBinary, Resource, ResourceArc};
 use std::sync::RwLock;
 
 /// Vectori de peste 4096 de dimensiuni nu vin de la niciun model de embedding
 /// cunoscut. Ne cunoaștem marginile *înainte* de a aloca.
 const MAX_DIMENSION: usize = 4096;
+
+/// Antetul unui instantaneu. Patru octeți care spun „asta e o memorie Bahmet,
+/// versiunea 1" — ca un fișier străin cu extensia potrivită să fie refuzat
+/// imediat, nu interpretat ca vectori.
+const MAGIC: [u8; 4] = *b"BHM1";
+const HEADER: usize = 4 + 4 + 8; // magic + dimensiune + număr
 
 // ═══════════════════════════════════════════════════════════════════════
 //  EROAREA — pură, testabilă
@@ -44,6 +50,10 @@ pub enum RecallError {
     /// comparat cu nimic.
     NotFinite,
     UnboundedMemory,
+    /// Instantaneul nu are forma asteptata. Fisier trunchiat, alta versiune,
+    /// sau octeti straini care s-au nimerit sa aiba extensia potrivita.
+    Corrupt,
+    AllocationFailed,
     Unknown,
 }
 
@@ -53,6 +63,8 @@ mod atoms {
         dimension_discord,
         not_finite,
         unbounded_memory,
+        corrupt,
+        allocation_failed,
         unknown,
     }
 }
@@ -63,6 +75,8 @@ impl RecallError {
             Self::DimensionDiscord => atoms::dimension_discord(),
             Self::NotFinite => atoms::not_finite(),
             Self::UnboundedMemory => atoms::unbounded_memory(),
+            Self::Corrupt => atoms::corrupt(),
+            Self::AllocationFailed => atoms::allocation_failed(),
             Self::Unknown => atoms::unknown(),
         }
     }
@@ -210,6 +224,105 @@ impl Memory {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+//  INSTANTANEUL
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Vectorii NU sunt secrete -- sunt numere derivate din text pe care oricum îl
+// ai. De aceea `snapshot' există, spre deosebire de `export_key' din seif:
+// asimetria de acolo protejează chei, iar aici nu e nimic de protejat.
+//
+// Formatul e explicit și verificabil, nu `bincode' sau altă serializare care
+// se schimbă tăcut între versiuni. Un fișier scris azi trebuie citit peste un
+// an, de un binar recompilat, fără surprize.
+//
+//   "BHM1" · dimensiune u32 BE · număr u64 BE
+//   apoi, de `număr' ori: id i64 BE · `dimensiune' × f32 BE
+
+fn snapshot_bytes(memory: &Memory) -> Vec<u8> {
+    let vectors = read(&memory.vectors);
+    let ids = read(&memory.ids);
+
+    let stride = 8 + memory.dimension * 4;
+    let mut out = Vec::with_capacity(HEADER + ids.len() * stride);
+    out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&(memory.dimension as u32).to_be_bytes());
+    out.extend_from_slice(&(ids.len() as u64).to_be_bytes());
+
+    // `chunks_exact` din nou: nicio indexare, deci nicio ieșire posibilă.
+    for (row, id) in vectors.chunks_exact(memory.dimension).zip(ids.iter()) {
+        out.extend_from_slice(&id.to_be_bytes());
+        for value in row {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+    }
+    out
+}
+
+/// Reconstruiește memoria dintr-un instantaneu.
+///
+/// Vectorii au fost normalizați la inserare și rămân normalizați aici: un
+/// instantaneu păstrează invariantul, nu doar datele. De aceea nu renormalizăm
+/// — ar fi muncă în plus pentru același rezultat.
+///
+/// Tot ce citim din fișier trece prin `get()`, care întoarce `Option`. Niciun
+/// index, deci niciun panic posibil pe un fișier trunchiat sau ostil.
+fn restore_bytes(blob: &[u8]) -> Result<Memory, RecallError> {
+    let magic = blob.get(0..4).ok_or(RecallError::Corrupt)?;
+    if magic != MAGIC {
+        return Err(RecallError::Corrupt);
+    }
+
+    let dimension = read_u32(blob, 4)? as usize;
+    let count = read_u64(blob, 8)? as usize;
+
+    if dimension == 0 || dimension > MAX_DIMENSION {
+        return Err(RecallError::UnboundedMemory);
+    }
+
+    let stride = 8 + dimension * 4;
+    let body = blob.get(HEADER..).ok_or(RecallError::Corrupt)?;
+    if body.len() != count.saturating_mul(stride) {
+        return Err(RecallError::Corrupt);
+    }
+
+    let mut vectors = Vec::with_capacity(count * dimension);
+    let mut ids = Vec::with_capacity(count);
+
+    for entry in body.chunks_exact(stride) {
+        let (id_bytes, vector_bytes) = entry.split_at(8);
+        ids.push(i64::from_be_bytes(
+            id_bytes.try_into().map_err(|_| RecallError::Corrupt)?,
+        ));
+        for value in vector_bytes.chunks_exact(4) {
+            let quad: [u8; 4] = value.try_into().map_err(|_| RecallError::Corrupt)?;
+            let float = f32::from_be_bytes(quad);
+            if !float.is_finite() {
+                return Err(RecallError::Corrupt);
+            }
+            vectors.push(float);
+        }
+    }
+
+    Ok(Memory {
+        dimension,
+        vectors: RwLock::new(vectors),
+        ids: RwLock::new(ids),
+    })
+}
+
+fn read_u32(blob: &[u8], at: usize) -> Result<u32, RecallError> {
+    let slice = blob.get(at..at + 4).ok_or(RecallError::Corrupt)?;
+    let quad: [u8; 4] = slice.try_into().map_err(|_| RecallError::Corrupt)?;
+    Ok(u32::from_be_bytes(quad))
+}
+
+fn read_u64(blob: &[u8], at: usize) -> Result<u64, RecallError> {
+    let slice = blob.get(at..at + 8).ok_or(RecallError::Corrupt)?;
+    let eight: [u8; 8] = slice.try_into().map_err(|_| RecallError::Corrupt)?;
+    Ok(u64::from_be_bytes(eight))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 //  MIEZUL PUR
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -282,6 +395,21 @@ fn status(memory: ResourceArc<Memory>) -> MemoryStatus {
         dimension: memory.dimension,
         remembered: memory.len(),
     }
+}
+
+/// `DirtyCpu`: un instantaneu de 300 MB nu are ce căuta pe un planificator
+/// normal, oricât de simplă e copierea.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn snapshot<'a>(env: Env<'a>, memory: ResourceArc<Memory>) -> NifResult<Binary<'a>> {
+    let bytes = snapshot_bytes(&memory);
+    let mut owned = OwnedBinary::new(bytes.len()).ok_or(RecallError::AllocationFailed)?;
+    owned.as_mut_slice().copy_from_slice(&bytes);
+    Ok(owned.release(env))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn restore(blob: Binary) -> NifResult<ResourceArc<Memory>> {
+    Ok(ResourceArc::new(restore_bytes(blob.as_slice())?))
 }
 
 rustler::init!("bahmet_recall");
@@ -400,6 +528,57 @@ mod tests {
         m.remember(1, &[1.0, 0.0]).unwrap();
         assert_eq!(m.forget(99), 0);
         assert_eq!(m.len(), 1);
+    }
+
+    /// Bucla completă: ce a fost ținut minte se regăsește identic, cu aceleași
+    /// identități, aceeași ordine și aceleași scoruri.
+    #[test]
+    fn instantaneul_se_inchide() {
+        let m = memory(3);
+        m.remember(10, &[1.0, 0.0, 0.0]).unwrap();
+        m.remember(20, &[0.0, 1.0, 0.0]).unwrap();
+        m.remember(30, &[0.5, 0.5, 0.0]).unwrap();
+
+        let before = m.recall(&[1.0, 0.0, 0.0], 3).unwrap();
+        let restored = restore_bytes(&snapshot_bytes(&m)).unwrap();
+
+        assert_eq!(restored.dimension, 3);
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored.recall(&[1.0, 0.0, 0.0], 3).unwrap(), before);
+    }
+
+    #[test]
+    fn instantaneul_unei_memorii_goale_e_valid() {
+        let restored = restore_bytes(&snapshot_bytes(&memory(768))).unwrap();
+        assert_eq!(restored.dimension, 768);
+        assert_eq!(restored.len(), 0);
+    }
+
+    /// Un fișier străin cu extensia potrivită trebuie refuzat imediat, nu
+    /// interpretat ca vectori. De aceea există antetul.
+    ///
+    /// NOTĂ: comparăm EROAREA, nu `Result`-ul. `assert_eq!` pe
+    /// `Result<Memory, _>` ar cere `PartialEq` pentru `Memory` — iar sugestia
+    /// compilatorului de a-l deriva ar genera o comparație a tuturor
+    /// vectorilor, adică muncă masivă pentru un test care vrea doar să știe
+    /// că a eșuat. Aceeași capcană ca la `KeyHandle` din seif.
+    #[test]
+    fn octetii_straini_sunt_refuzati() {
+        assert_eq!(restore_bytes(b"nu sunt o memorie").unwrap_err(), RecallError::Corrupt);
+        assert_eq!(restore_bytes(&[]).unwrap_err(), RecallError::Corrupt);
+        assert_eq!(restore_bytes(&MAGIC).unwrap_err(), RecallError::Corrupt);
+    }
+
+    /// Un fișier trunchiat -- disc plin, copiere întreruptă -- nu are voie să
+    /// producă o memorie pe jumătate, care ar răspunde plauzibil și incomplet.
+    #[test]
+    fn instantaneul_trunchiat_e_refuzat() {
+        let m = memory(4);
+        m.remember(1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        let full = snapshot_bytes(&m);
+        for cut in [1, HEADER, HEADER + 4, full.len() - 1] {
+            assert_eq!(restore_bytes(&full[..cut]).unwrap_err(), RecallError::Corrupt);
+        }
     }
 
     #[test]

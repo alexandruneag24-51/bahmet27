@@ -13,3 +13,5 @@ logs/
 bahmet_deks*
 src/bahmet_lexer.erl
 src/bahmet_parser.erl
+*.snapshot
+*.snapshot.tmp

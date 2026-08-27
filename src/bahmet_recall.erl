@@ -12,9 +12,11 @@
 %%%-------------------------------------------------------------------
 -module(bahmet_recall).
 
--export([open_memory/1, remember/3, forget/2, recall/3, status/1]).
+-export([open_memory/1, remember/3, forget/2, recall/3, status/1,
+         snapshot/1, restore/1, verify/0]).
 
--nifs([open_memory/1, remember/3, forget/2, recall/3, status/1]).
+-nifs([open_memory/1, remember/3, forget/2, recall/3, status/1,
+       snapshot/1, restore/1]).
 
 -on_load(init/0).
 
@@ -57,6 +59,61 @@ recall(_Memory, _Query, _K) -> erlang:nif_error(nif_not_loaded).
 -spec status(memory()) ->
           #{dimension := pos_integer(), remembered := non_neg_integer()}.
 status(_Memory) -> erlang:nif_error(nif_not_loaded).
+
+%% @doc Instantaneul memoriei, ca binar.
+%%
+%% Vectorii NU sunt secrete -- sunt numere derivate din text pe care oricum il
+%% ai. De aceea `snapshot' exista, spre deosebire de `export_key' din seif:
+%% asimetria de acolo protejeaza chei, iar aici nu e nimic de protejat.
+%%
+%% Formatul e explicit si versionat: "BHM1", dimensiune, numar, apoi perechi
+%% de identitate si vector. Un fisier scris azi trebuie citit peste un an, de
+%% un binar recompilat, fara surprize.
+-spec snapshot(memory()) -> binary().
+snapshot(_Memory) -> erlang:nif_error(nif_not_loaded).
+
+%% @doc Reconstruieste memoria dintr-un instantaneu.
+%%
+%% Refuza orice nu are antetul asteptat, orice e trunchiat si orice contine
+%% valori neterminate. O memorie pe jumatate restaurata ar raspunde plauzibil
+%% si incomplet -- cel mai scump fel de esec.
+-spec restore(binary()) ->
+          memory() | {error, corrupt | unbounded_memory}.
+restore(_Blob) -> erlang:nif_error(nif_not_loaded).
+
+%% @doc Verifica la pornire ca biblioteca nativa chiar are ce declara modulul.
+%%
+%% `-nifs' doar PERMITE inlocuirea unei functii, nu o cere. Daca biblioteca e
+%% mai veche decat modulul -- pentru ca `cargo build' a esuat, iar `.so'-ul a
+%% ramas cel de ieri -- incarcarea REUSESTE, functiile prezente merg normal,
+%% iar cele lipsa raman stub-uri.
+%%
+%% Modul de esec e nesuferit: totul pare in regula pana la primul apel al
+%% functiei lipsa, care poate veni dupa ce ai asimilat o carte intreaga.
+%%
+%% Deci verificam temelia la pornire, nu la prima folosire -- exact ce face
+%% `bahmet_entropy'. O bucla completa pe o memorie de patru dimensiuni costa
+%% microsecunde si transforma o descoperire tarzie intr-un refuz imediat.
+-spec verify() -> ok | {error, {stale_library, term()}}.
+verify() ->
+    try
+        Memory = open_memory(4),
+        ok = remember(Memory, 1, [1.0, 0.0, 0.0, 0.0]),
+        case restore(snapshot(Memory)) of
+            {error, Why} ->
+                {error, {stale_library, Why}};
+            Restored ->
+                case status(Restored) of
+                    #{remembered := 1} -> ok;
+                    Other -> {error, {stale_library, Other}}
+                end
+        end
+    catch
+        error:nif_not_loaded ->
+            {error, {stale_library, "biblioteca nativa e mai veche decat modulul: ruleaza ./build.sh"}};
+        Class:Reason ->
+            {error, {stale_library, {Class, Reason}}}
+    end.
 
 init() ->
     SoName =
