@@ -97,7 +97,7 @@ ales absența.
 Ai nevoie de **Erlang/OTP 25+** și **Rust 1.70+**.
 
 ```bash
-git clone <repo> && cd bahmet27
+git clone https://github.com/alexandruneag24-51/bahmet27.git && cd bahmet27
 ./check.sh
 ```
 
