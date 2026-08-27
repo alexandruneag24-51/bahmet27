@@ -1,0 +1,21 @@
+[package]
+name = "bahmet_recall"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "Memoria: depozit de vectori si cautare prin similaritate"
+license = "Apache-2.0"
+
+[lib]
+name = "bahmet_recall"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rustler = "0.36"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
