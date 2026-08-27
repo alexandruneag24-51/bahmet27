@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# bahmet -- porneste consola.
+#
+# Un singur lucru de tastat, cu tot mediul pregatit: fara dump-uri pe disc,
+# cu diacriticele afisate ca text, cu cheia de test generata daca lipseste.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
+# Un crash care scrie heap-urile proceselor pe disc ar putea sa scrie si ce a
+# trecut prin ele. Vezi CRYPTO.md §1.
+export ERL_CRASH_DUMP_SECONDS=0
+
+# `+pc unicode': binarele UTF-8 se afiseaza ca text, nu ca liste de octeti.
+export ERL_FLAGS="+pc unicode"
+
+if [ -z "${BAHMET_ROOT_KEY:-}" ]; then
+    if command -v openssl >/dev/null 2>&1; then
+        export BAHMET_ROOT_KEY="$(openssl rand -hex 32)"
+    else
+        export BAHMET_ROOT_KEY="$(head -c32 /dev/urandom | xxd -p -c64)"
+    fi
+fi
+
+if ! curl -sf --max-time 2 http://localhost:11434/api/tags >/dev/null 2>&1; then
+    echo
+    echo "  Ollama nu raspunde pe 11434. Porneste-l intr-un alt terminal:"
+    echo "      ollama serve"
+    echo "  Consola porneste oricum -- dar nu va putea citi si nici raspunde."
+    echo
+fi
+
+exec rebar3 shell --eval "bahmet:help()."

@@ -15,3 +15,5 @@ src/bahmet_lexer.erl
 src/bahmet_parser.erl
 *.snapshot
 *.snapshot.tmp
+*.snapshot
+*.snapshot.tmp
