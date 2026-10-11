@@ -14,9 +14,12 @@
 
 -export([open_memory/1, remember/3, forget/2, recall/3, status/1,
          snapshot/1, restore/1, verify/0]).
+-export([compress/3, compress/4, recall_coded/3, code_of/2, glyph/1,
+         coded_status/1]).
 
 -nifs([open_memory/1, remember/3, forget/2, recall/3, status/1,
-       snapshot/1, restore/1]).
+       snapshot/1, restore/1,
+       compress/4, recall_coded/3, code_of/2, glyph/1, coded_status/1]).
 
 -on_load(init/0).
 
@@ -24,8 +27,10 @@
 -define(LIBNAME, "libbahmet_recall").
 
 -opaque memory() :: reference().
+-opaque coded() :: reference().
 -type vector() :: [float()].
--export_type([memory/0, vector/0]).
+-type code() :: [non_neg_integer()].
+-export_type([memory/0, coded/0, vector/0, code/0]).
 
 %% @doc Deschide o memorie de o forma anume.
 %%
@@ -80,6 +85,45 @@ snapshot(_Memory) -> erlang:nif_error(nif_not_loaded).
 -spec restore(binary()) ->
           memory() | {error, corrupt | unbounded_memory}.
 restore(_Blob) -> erlang:nif_error(nif_not_loaded).
+
+%%====================================================================
+%% Codurile -- memoria comprimata (vezi native/bahmet_recall/src/pq.rs)
+%%====================================================================
+
+%% @doc Comprima o memorie in coduri scurte: `Parts' felii, fiecare
+%% inlocuita de adresa celei mai apropiate dintre `Centroids' forme invatate.
+%%
+%% 4 x 256 da 4 octeti per amintire; 4 x 10000 da 8 octeti, dar tabele de
+%% ~40 de ori mai mari. Masuratorile sunt in RAG.md, sectiunea 7.
+%%
+%% Rezultatul e o fotografie: amintirile adaugate dupa nu apar in ea.
+-spec compress(memory(), Parts :: pos_integer(), Centroids :: pos_integer()) ->
+          coded() | {error, dimension_discord | unbounded_memory}.
+compress(Memory, Parts, Centroids) -> compress(Memory, Parts, Centroids, 8).
+
+-spec compress(memory(), pos_integer(), pos_integer(), Iterations :: pos_integer()) ->
+          coded() | {error, dimension_discord | unbounded_memory}.
+compress(_Memory, _Parts, _Centroids, _Iterations) -> erlang:nif_error(nif_not_loaded).
+
+%% @doc Cele mai apropiate `K' amintiri, dupa scorul aproximat din coduri.
+-spec recall_coded(coded(), vector(), K :: pos_integer()) ->
+          [{Id :: integer(), Score :: float()}] | {error, dimension_discord | not_finite}.
+recall_coded(_Coded, _Query, _K) -> erlang:nif_error(nif_not_loaded).
+
+%% @doc Codul unei amintiri: `Parts' numere.
+-spec code_of(coded(), Id :: integer()) -> code() | {error, not_found}.
+code_of(_Coded, _Id) -> erlang:nif_error(nif_not_loaded).
+
+%% @doc Chipul unui cod, ca SVG: cate un semn cistercian pentru fiecare parte,
+%% asezate in patrat. Fiecare parte trebuie sa fie cel mult 9999.
+-spec glyph(code()) -> binary() | {error, not_representable}.
+glyph(_Code) -> erlang:nif_error(nif_not_loaded).
+
+-spec coded_status(coded()) ->
+          #{dimension := pos_integer(), parts := pos_integer(),
+            centroids := pos_integer(), remembered := non_neg_integer(),
+            bytes := non_neg_integer(), full_bytes := non_neg_integer()}.
+coded_status(_Coded) -> erlang:nif_error(nif_not_loaded).
 
 %% @doc Verifica la pornire ca biblioteca nativa chiar are ce declara modulul.
 %%

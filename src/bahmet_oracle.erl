@@ -48,7 +48,8 @@
 
 -type failure() :: {unreachable, term()}
                  | {refused, integer(), binary()}
-                 | {malformed, term()}.
+                 | {malformed, term()}
+                 | {guarded, bahmet_guard:category()}.
 
 %%====================================================================
 %% Coborarea in Adanc
@@ -58,8 +59,15 @@
 -spec ask(binary()) -> {ok, binary()} | {error, failure()}.
 ask(Prompt) -> ask(Prompt, #{}).
 
+%%
+%% Cererea trece intai pe la `bahmet_guard'. Un refuz al strajerului nu
+%% ajunge niciodata la model: intoarce `{error, {guarded, Categorie}}', iar
+%% `bahmet_guard:refusal/1' da textul de aratat omului.
 -spec ask(binary(), map()) -> {ok, binary()} | {error, failure()}.
 ask(Prompt, Options) ->
+    guarded(Prompt, fun() -> ask_unguarded(Prompt, Options) end).
+
+ask_unguarded(Prompt, Options) ->
     Payload = #{
         <<"model">> => maps:get(model, Options, text_model()),
         <<"prompt">> => Prompt,
@@ -85,6 +93,9 @@ see(Prompt, Image) -> see(Prompt, Image, #{}).
 
 -spec see(binary(), binary(), map()) -> {ok, binary()} | {error, failure()}.
 see(Prompt, Image, Options) when is_binary(Image) ->
+    guarded(Prompt, fun() -> see_unguarded(Prompt, Image, Options) end).
+
+see_unguarded(Prompt, Image, Options) ->
     Payload = #{
         <<"model">> => maps:get(model, Options, vision_model()),
         <<"prompt">> => Prompt,
@@ -170,6 +181,12 @@ dimension() ->
 %%====================================================================
 %% Intern
 %%====================================================================
+
+guarded(Prompt, Go) ->
+    case bahmet_guard:screen(Prompt) of
+        ok -> Go();
+        {refuse, Category} -> {error, {guarded, Category}}
+    end.
 
 request(Path, Payload, Timeout) ->
     ensure_inets(),
