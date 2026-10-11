@@ -27,6 +27,9 @@
 use rustler::{Atom, Binary, Env, NifResult, OwnedBinary, Resource, ResourceArc};
 use std::sync::RwLock;
 
+pub mod cistercian;
+pub mod pq;
+
 /// Vectori de peste 4096 de dimensiuni nu vin de la niciun model de embedding
 /// cunoscut. Ne cunoaștem marginile *înainte* de a aloca.
 const MAX_DIMENSION: usize = 4096;
@@ -54,6 +57,10 @@ pub enum RecallError {
     /// sau octeti straini care s-au nimerit sa aiba extensia potrivita.
     Corrupt,
     AllocationFailed,
+    /// O amintire cerută după identitate nu există.
+    NotFound,
+    /// Un număr care nu are semn cistercian (peste 9.999).
+    NotRepresentable,
     Unknown,
 }
 
@@ -65,6 +72,8 @@ mod atoms {
         unbounded_memory,
         corrupt,
         allocation_failed,
+        not_found,
+        not_representable,
         unknown,
     }
 }
@@ -77,6 +86,8 @@ impl RecallError {
             Self::UnboundedMemory => atoms::unbounded_memory(),
             Self::Corrupt => atoms::corrupt(),
             Self::AllocationFailed => atoms::allocation_failed(),
+            Self::NotFound => atoms::not_found(),
+            Self::NotRepresentable => atoms::not_representable(),
             Self::Unknown => atoms::unknown(),
         }
     }
@@ -410,6 +421,78 @@ fn snapshot<'a>(env: Env<'a>, memory: ResourceArc<Memory>) -> NifResult<Binary<'
 #[rustler::nif(schedule = "DirtyCpu")]
 fn restore(blob: Binary) -> NifResult<ResourceArc<Memory>> {
     Ok(ResourceArc::new(restore_bytes(blob.as_slice())?))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  CODURILE — memoria comprimată (vezi `pq.rs`)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// O memorie comprimată e o fotografie: se construiește o dată dintr-o
+/// memorie întreagă și nu se mai schimbă. Fără lacăt, fiindcă nu are scriitori.
+pub struct Coded(pq::CodedMemory);
+
+#[rustler::resource_impl]
+impl Resource for Coded {}
+
+impl Memory {
+    fn compress(&self, parts: usize, centroids: usize, iterations: usize) -> Result<pq::CodedMemory, RecallError> {
+        let vectors = read(&self.vectors);
+        let ids = read(&self.ids);
+        pq::CodedMemory::build(&vectors, &ids, self.dimension, parts, centroids, iterations, 27)
+    }
+}
+
+/// `DirtyCpu`: învățarea tabelelor e k-means pe tot corpusul -- secunde, nu
+/// microsecunde.
+#[rustler::nif(schedule = "DirtyCpu")]
+fn compress(memory: ResourceArc<Memory>, parts: usize, centroids: usize, iterations: usize) -> NifResult<ResourceArc<Coded>> {
+    Ok(ResourceArc::new(Coded(memory.compress(parts, centroids, iterations)?)))
+}
+
+#[rustler::nif(schedule = "DirtyCpu")]
+fn recall_coded(coded: ResourceArc<Coded>, query: Vec<f64>, k: usize) -> NifResult<Vec<(i64, f64)>> {
+    let needle = normalize(&query)?;
+    let found = coded.0.recall(&needle, k)?;
+    Ok(found.into_iter().map(|(id, s)| (id, f64::from(s))).collect())
+}
+
+#[rustler::nif]
+fn code_of(coded: ResourceArc<Coded>, id: i64) -> NifResult<Vec<u16>> {
+    Ok(coded.0.code_of(id).ok_or(RecallError::NotFound)?.to_vec())
+}
+
+/// Chipul unui cod, ca SVG: patru semne cisterciene într-un pătrat.
+#[rustler::nif]
+fn glyph<'a>(env: Env<'a>, code: Vec<u16>) -> NifResult<Binary<'a>> {
+    let svg = cistercian::code_svg(&code).ok_or(RecallError::NotRepresentable)?;
+    let mut owned = OwnedBinary::new(svg.len()).ok_or(RecallError::AllocationFailed)?;
+    owned.as_mut_slice().copy_from_slice(svg.as_bytes());
+    Ok(owned.release(env))
+}
+
+#[derive(rustler::NifMap)]
+struct CodedStatus {
+    dimension: usize,
+    parts: usize,
+    centroids: usize,
+    remembered: usize,
+    /// Octeții codurilor și ai tabelelor.
+    bytes: usize,
+    /// Cât ar ocupa aceiași vectori întregi.
+    full_bytes: usize,
+}
+
+#[rustler::nif]
+fn coded_status(coded: ResourceArc<Coded>) -> CodedStatus {
+    let m = &coded.0;
+    CodedStatus {
+        dimension: m.book.dimension,
+        parts: m.book.parts,
+        centroids: m.book.centroids,
+        remembered: m.len(),
+        bytes: m.bytes(),
+        full_bytes: m.len() * m.book.dimension * 4,
+    }
 }
 
 rustler::init!("bahmet_recall");

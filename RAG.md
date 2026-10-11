@@ -201,3 +201,47 @@ Peste jumătate de milion de bucăți, depozitul din RAM devine problema: 500.00
 Până acolo, un `Vec<f32>` contiguu e mai rapid decât aproape orice bază de date
 vectorială — fiindcă nu are rețea, nu are serializare, și nu are un al doilea
 proces de supravegheat.
+
+---
+
+## 7. Codurile — memoria comprimată (cifre cisterciene)
+
+Fiecare vector e tăiat în felii; fiecare felie e înlocuită de adresa celei
+mai apropiate forme dintr-un tabel învățat (cuantizare pe produs). Codul are
+patru părți, ca o cifră cisterciană cu patru cadrane, și se poate desena ca
+atare: `bahmet_recall:glyph(Code)` întoarce un SVG.
+
+```erlang
+Coded = bahmet_recall:compress(Memory, 4, 256),     % 4 părți × 256 de forme
+bahmet_recall:recall_coded(Coded, Query, 10),
+bahmet_recall:glyph(bahmet_recall:code_of(Coded, Id)).
+```
+
+Măsurat cu `cargo run --release --example pq_bench` (date **sintetice**,
+20.000 de amintiri × 768, 200 de întrebări, 4 nuclee):
+
+| Variantă | Memorie | Învățare | Per întrebare | recall@10 |
+|---|---|---|---|---|
+| vectori întregi (exact) | 58,6 MB | – | 10,8 ms | 100% |
+| 4 × 256 | **846 KB** | 6,6 s | **0,33 ms** | 48% |
+| 4 × 256 + reordonare exactă a primilor 100 | 846 KB + vectori pe disc | – | 0,44 ms | **100%** |
+| 4 × 10.000 | 29,4 MB | 181 s | 3,9 ms | 69% |
+| 4 × 10.000 + reordonare | 29,4 MB + vectori pe disc | – | 4,0 ms | 100% |
+| 16 × 256 | 1,1 MB | 5,2 s | 0,40 ms | 55% |
+
+Ce spun cifrele:
+
+- **4 × 256 câștigă.** De ~70 de ori mai puțină memorie, de ~30 de ori mai
+  rapid. Singur, găsește doar jumătate din vecinii exacți — dar cei 10
+  adevărați sunt mereu în primii 100, deci o reordonare exactă a acelor 100
+  aduce precizia la 100% cu 0,1 ms în plus.
+- **4 × 10.000 nu merită.** Tabelele lui ocupă cât jumătate din vectorii
+  întregi, învățarea durează de ~27 de ori mai mult, iar căutarea e de ~12
+  ori mai lentă decât 4 × 256 — pentru un câștig de precizie pe care
+  reordonarea îl dă oricum.
+- Datele sunt sintetice. Pe o memorie reală, rulează
+  `cargo run --release --example pq_bench -- memorie.bhm1`, după
+  `file:write_file("memorie.bhm1", bahmet_recall:snapshot(M))`.
+
+Pasul următor firesc: vectorii întregi pe disc (mmap), codurile în RAM, și
+reordonarea legată în `bahmet_memory`.
